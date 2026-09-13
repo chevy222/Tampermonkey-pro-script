@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         色花堂缩略图
 // @namespace    http://98tang.com/
-// @version      2.4.1
-// @description  PC版列表页加载移动版缩略图、宽屏布局、清理无用元素；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新并宽屏。
+// @version      2.4.2
+// @description  PC版列表页加载移动版缩略图、宽屏布局、清理无用元素；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新并宽屏；列表页按真实视口几何判定首屏优先加载，非首屏按需加载以节省带宽。
 //   v1.7：彻底移除全部懒加载（含原生 loading=lazy，后台标签页/无布局时也能立即请求）；decoding 统一为 async 不阻塞渲染；缩略图域名 preconnect 预连接提速；移动版请求失败自动重试且只缓存成功结果；列表/搜索/详情三页懒加载清除逻辑合并精简约300行。
 //   v1.8：详情图请求增加反爬拦截页检测与退避重试，被拦截的帖子不再被永久标记、后续可重试。
 //   v1.9：lazyload 构造函数拦截改为普通函数（new 不再抛 TypeError）；列表页自动加载仅在请求有效时推进页码、无效/被拦批次回滚标记自动重试；移动版空响应区分拦截页与 UA 未生效并告警；详情图统一仅接受 http(s)；搜索页 tid 数字校验；缩略图缓存键加入 fid。
@@ -32,6 +32,15 @@
 //        失败路径从 1+1+3 次请求降为 1+3 次；
 //     ② 修复审计 #2：createThumbWrap 的张数封顶由硬编码 5 改为 MAX_THUMBS_PER_POST 常量联动，
 //        并在常量注释中标注「CSS 只定义到 n5」的联动约束。
+//   v2.4.2（2026-09-13 审计第二批次清偿，#3/#4/#5/#7/#8/#11/#12/#15）：
+//     ① 搜索页与详情页逐字重复的"强制图片可见"CSS 收敛为 forceVisibleCSS()（#3）；
+//     ② fetchMobileThumbs 内联的 safeid 判定改用已有的 isSafePage()（#4）；
+//     ③ 'sehuaBusyRetry' 字面量提为 BUSY_RETRY_KEY 常量，四处统一（#5）；
+//     ④ watchImages 的 attributeFilter 改由 LAZY_ATTRS 派生，两份清单永不再脱钩（#7）；
+//     ⑤ 详情页重试参数提为 DETAIL_RETRY_TIMES / DETAIL_RETRY_BASE_MS 常量（#8）；
+//     ⑥ visibilitychange 监听改为首次排期兜底时才注册，详情/首页不再常驻空定时器（#11）；
+//     ⑦ @description 补 v2.3 起的核心行为变化"首屏几何判定 + 非首屏按需加载"（#12）；
+//     ⑧ eager/lazy 两分支的 img.complete 缓存兜底对称化（#15）。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
 // @connect      bhagq.4yl7j.com
@@ -74,11 +83,19 @@
   const MOBILE_RETRY_TIMES = 2;
   const MOBILE_RETRY_DELAY = 1500;
 
+  // 详情页（fallback/搜索页取图）被拦截后的重试次数与退避基数
+  // 实际间隔 = 基数 + 第几次×基数：2s / 4s（与旧版硬编码行为一致）
+  const DETAIL_RETRY_TIMES = 3;
+  const DETAIL_RETRY_BASE_MS = 2000;
+
   // 搜索页要过滤的栏目
   const BLOCK_FORUMS = ['求片问答悬赏区', '资源出售区', 'AI专区', '国产自拍', 'TXT小说下载'];
 
   // 过滤开关状态的 localStorage 键名
   const FILTER_STORAGE_KEY = 'sehuaFilterState';
+
+  // 搜索繁忙重试计数的 sessionStorage 键名（v2.4.2 提为常量，原三处字面量 + 一处局部变量）
+  const BUSY_RETRY_KEY = 'sehuaBusyRetry';
 
   // 所有可能的懒加载属性（按优先级排序）
   const LAZY_ATTRS = ['file', 'zoomfile', 'data-original', 'data-src', 'data-loadsrc', 'data-thumb', 'data-lazy-src', 'original', 'data-url'];
@@ -129,15 +146,21 @@
   }
 
   // 排期兜底（已排则不重复排，避免持续新增导致永不触发）
+  // v2.4.2（审计 #11）：visibilitychange 监听改为首次排期时才注册——原先在 IIFE 顶层
+  // 无条件注册，详情页/首页这类根本不会创建 lazy 缩略图的页面也常驻，每次切回前台
+  // 都白排一个 10s 定时器。懒注册后只有真正用上按需加载的页面（列表/搜索）才有此开销
+  let visibilityBound = false;
   function scheduleLazySafety() {
     if (lazySafetyTimer) return;
     lazySafetyTimer = setTimeout(releaseStaleLazy, LAZY_SAFETY_MS);
+    if (!visibilityBound) {
+      visibilityBound = true;
+      // 页面重新可见时补排一次兜底（隐藏期间被跳过的批次靠这里接上）
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') scheduleLazySafety();
+      });
+    }
   }
-
-  // 页面重新可见时补排一次兜底（隐藏期间被跳过的批次靠这里接上）
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') scheduleLazySafety();
-  });
 
   // ============================ 工具函数 ============================
 
@@ -271,7 +294,8 @@
             const thumbs = doc.querySelectorAll('.n5_htmk');
             if (thumbs.length === 0) {
               // 空结果的两种根因要区分开：反爬拦截页 vs 自定义 UA 头未生效拿到 PC 版
-              if (resp.responseText.indexOf('safeid') !== -1) {
+              // （v2.4.2 起复用 isSafePage，原先这里又内联写了一遍 indexOf —— 审计 #4）
+              if (isSafePage(resp.responseText)) {
                 console.error('[色花堂缩略图] 移动版请求疑似被反爬拦截页挡下:', url);
               } else {
                 console.error('[色花堂缩略图] 未找到移动版结构(.n5_htmk)，可能自定义 User-Agent 头未生效而拿到了 PC 版页面');
@@ -370,6 +394,16 @@
     document.head.appendChild(style);
   }
 
+  // 强制容器内所有图片立即可见的页面级 CSS
+  // （v2.4.2 收敛审计 #3：搜索页 #threadlist 与详情页 #postlist 原各写一份，
+  //   四行内容逐字相同仅选择器不同；站点对懒加载图加 visibility:hidden 等图出来再显示）
+  function forceVisibleCSS(selector) {
+    return `
+      ${selector} img { opacity: 1 !important; visibility: visible !important; transition: none !important; }
+      ${selector} img.lazy, ${selector} img.lazyload { opacity: 1 !important; visibility: visible !important; }
+    `;
+  }
+
   // 注入列表页 CSS
   function injectStyles() {
     addStyle(`
@@ -440,11 +474,15 @@
     });
     // v2.3：attributeFilter 去掉 'class'。每张缩略图加载完都会 classList.remove('sehua-loading')，
     // 分页/筛选也会成片改 class，而 forceEagerImg 只依赖 src / 懒加载属性，监听 class 纯属噪音。
+    // v2.4.2（审计 #7）：地址属性清单改由 LAZY_ATTRS 派生，与 getRealSrc 的探测表永不再脱钩
+    // （原先手写 8 个、与 LAZY_ATTRS 的 9 个不同步，data-thumb 等变化会漏监听）；
+    // 其余 4 个是状态属性：src/lazy/loadsrc 是站点脚本会改写的，data-lazy 是 forceEagerImg
+    // 自己会 removeAttribute 的。均为现清单的超集，只会多触发幂等回调，不会漏。
     observer.observe(mainContainer(), {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['file', 'zoomfile', 'data-original', 'data-src', 'data-loadsrc', 'src', 'lazy', 'loadsrc']
+      attributeFilter: LAZY_ATTRS.concat(['src', 'lazy', 'loadsrc', 'data-lazy'])
     });
   }
 
@@ -555,23 +593,30 @@
       img.addEventListener('load', onload, { once: true });
       img.addEventListener('error', onerror, { once: true });
 
+      // 缓存兜底（v2.4.2 审计 #15：两分支对称）：complete 为 true 后不会再触发
+      // load/error 事件——naturalWidth === 0 是被浏览器缓存住的失败结果，必须直接
+      // 走 onerror，否则该图会带着 shimmer 占位永远卡住。lazy 图在预取距离内时
+      // 同样可能立即命中缓存完成，事件或已派发完毕，监听器收不到回调。
+      // 手动结算与后续事件重复触发均幂等（onload 移 class 可重复、onerror remove 可重复）
+      const settleIfComplete = () => {
+        if (img.complete) {
+          img.naturalWidth > 0 ? onload() : onerror();
+        }
+      };
+
       if (eager) {
         // 首屏：立即发起请求；high 让首屏图优先于页面其余图片
         img.loading = 'eager';
         img.fetchPriority = 'high';
         img.src = url;
-        // complete 为 true 后不会再触发 load/error 事件：
-        // naturalWidth === 0 是被浏览器缓存住的失败结果，必须直接走 onerror，
-        // 否则该图会带着 shimmer 占位永远卡住
-        if (img.complete) {
-          img.naturalWidth > 0 ? onload() : onerror();
-        }
+        settleIfComplete();
       } else {
         // 非首屏：交给浏览器原生懒加载（会提前约一屏开始加载），不再设 src 就抢带宽。
         // 隐藏标签页下浏览器不会请求，此时由 releaseStaleLazy 在页面可见后兜底。
         img.loading = 'lazy';
         img.fetchPriority = 'low';
         img.src = url;
+        settleIfComplete();
         scheduleLazySafety();
       }
     });
@@ -722,10 +767,10 @@
       });
     }
     return (async () => {
-      for (let attempt = 0; attempt < 3; attempt++) {
+      for (let attempt = 0; attempt < DETAIL_RETRY_TIMES; attempt++) {
         const result = await requestOnce();
         if (result !== 'blocked') return result;
-        await sleep(2000 + attempt * 2000); // 退避：2s / 4s
+        await sleep(DETAIL_RETRY_BASE_MS + attempt * DETAIL_RETRY_BASE_MS); // 退避：2s / 4s
       }
       console.error('[色花堂缩略图] 详情页请求被反爬拦截:', tid);
       return null;
@@ -972,9 +1017,8 @@
       ${THUMB_CSS}
       .sehua-loading { color: #999; font-size: 12px; text-align: center; padding: 8px; }
       .slst.mtw { width: 100% !important; }
-      /* 搜索页：强制所有图片立即显示 */
-      #threadlist img { opacity: 1 !important; visibility: visible !important; transition: none !important; }
-      #threadlist img.lazy, #threadlist img.lazyload { opacity: 1 !important; visibility: visible !important; }
+      /* 搜索页：强制所有图片立即显示（v2.4.2 收敛，见 forceVisibleCSS） */
+      ${forceVisibleCSS('#threadlist')}
     `);
 
     removeUnused();
@@ -1003,17 +1047,17 @@
   // 检测"搜索繁忙"
   function autoReloadOnSearchBusy() {
     if (location.pathname.indexOf('/search.php') === -1) {
-      sessionStorage.removeItem('sehuaBusyRetry');
+      sessionStorage.removeItem(BUSY_RETRY_KEY);
       return false;
     }
     const msg = document.getElementById('messagetext');
     const text = msg ? msg.textContent : document.body.textContent;
     if (!text || text.indexOf('搜索繁忙') === -1) {
-      sessionStorage.removeItem('sehuaBusyRetry');
+      sessionStorage.removeItem(BUSY_RETRY_KEY);
       return false;
     }
 
-    const retryKey = 'sehuaBusyRetry';
+    const retryKey = BUSY_RETRY_KEY;
     let retryCount = parseInt(sessionStorage.getItem(retryKey) || '0');
     if (retryCount >= MAX_BUSY_RETRY) {
       console.warn(`[色花堂缩略图] 搜索繁忙已重试 ${retryCount} 次，停止自动刷新`);
@@ -1052,8 +1096,8 @@
       #postlist { width: 100% !important; }
       #postlist ignore_js_op img.zoom { display: block; margin-left: auto; margin-right: auto; }
       #postlist ignore_js_op { text-align: center; }
-      #postlist img { opacity: 1 !important; visibility: visible !important; transition: none !important; }
-      #postlist img.lazy, #postlist img.lazyload { opacity: 1 !important; visibility: visible !important; }
+      /* 详情页：强制所有图片立即显示（v2.4.2 收敛，见 forceVisibleCSS） */
+      ${forceVisibleCSS('#postlist')}
     `);
 
     removeUnused();
