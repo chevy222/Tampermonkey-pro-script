@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂缩略图
 // @namespace    http://98tang.com/
-// @version      2.3
+// @version      2.4
 // @description  PC版列表页加载移动版缩略图、宽屏布局、清理无用元素；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新并宽屏。
 //   v1.7：彻底移除全部懒加载（含原生 loading=lazy，后台标签页/无布局时也能立即请求）；decoding 统一为 async 不阻塞渲染；缩略图域名 preconnect 预连接提速；移动版请求失败自动重试且只缓存成功结果；列表/搜索/详情三页懒加载清除逻辑合并精简约300行。
 //   v1.8：详情图请求增加反爬拦截页检测与退避重试，被拦截的帖子不再被永久标记、后续可重试。
@@ -18,10 +18,19 @@
 //        变量与死 CSS；MutationObserver 去掉 class 监听（每张缩略图加载完都会改 class，纯噪音）；
 //     ④ 修正 v2.2 注释中"追加查询串会被图床挂起"的错误结论（实测正常返回），并补齐图床真实
 //        机制（Cloudflare + Backblaze B2，无服务端缩放；浏览器自动协商 WebP）。
+//   v2.4（2026-09-13 回归实测修复）：
+//     ① 修复 TM 沙箱隔离缺陷：带 @grant 时脚本内 window 是包装对象，纯赋值不透传到页面——
+//        interceptLazyLoad 对 LazyLoad / lazyload / IntersectionObserver 的覆盖自 v1.7 起
+//        从未真正生效（实测详情页页面上下文中 lazyload 仍是站点原库、IO 仍为 native），
+//        功能一直靠 forceEagerImg 的 DOM 级防线掩盖；现全部改经 unsafeWindow 写入真实页面；
+//     ② 首页不再挂常驻 MutationObserver（mainContainer 兜底到 body 等于监听整个文档，
+//        实测首页 64 图零懒加载、无动态新增场景，首轮 forceEagerAll 已全覆盖）；
+//     ③ 非首屏兜底放行 15s → 10s（实测转可见后 10s 内原生 lazy 已取完视口附近的图）。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
 // @connect      bhagq.4yl7j.com
 // @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
 // @run-at       document-start
 // @noframes
 // ==/UserScript==
@@ -96,7 +105,9 @@
   //   · 隐藏页一律不主动放行——用户不在看的时候替他下载整页图片才是真的浪费；
   //     页面重新可见后交给原生 lazy 处理（浏览器会立刻加载视口附近的图）。
   //   · 前台可见页用长时定时器兜底，防御浏览器懒加载启发式漏掉个别图而永久停在占位态。
-  const LAZY_SAFETY_MS = 15000;
+  // v2.4：15000 → 10000。实测页面转可见后 10s 内浏览器原生 lazy 已把视口附近的图取完，
+  // 兜底只防启发式漏网的个别图；缩短可减少漏加载图停留 shimmer 的最坏时长
+  const LAZY_SAFETY_MS = 10000;
   let lazySafetyTimer = null;
 
   // 兜底放行：只在页面可见时执行
@@ -430,23 +441,31 @@
   }
 
   // 拦截 Discuz 懒加载（三页共用）
+  // v2.4 沙箱修复：脚本带 @grant（沙箱模式）时，脚本内的 window 是包装对象——读取页面
+  // 全省会透传，但纯赋值（window.x = y）只写进沙箱，页面侧完全看不到。2026-09-13 回归
+  // 实测坐实：详情页页面上下文中 window.lazyload 仍是站点原库（function lazyload(className)
+  // 带 .imgs）、IntersectionObserver 仍是 [native code]——即下述全局覆盖自 v1.7 起从未生效，
+  // 功能一直靠 forceEagerImg 的 DOM 级防线（设 src + lazyloaded 标记，站点 showImage 碰到
+  // 标记即跳过）掩盖。因此对页面全局的读写一律改走 unsafeWindow。
+  const pageWindow = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+
   function interceptLazyLoad() {
     // 若 Discuz 已初始化 lazyload（scroll 监听已通过闭包绑定到原始实例），
     // 清空其待加载队列 lazyload.imgs，避免滚动时 showImage 继续处理队列中的图片
     try {
-      if (window.lazyload && window.lazyload.imgs) window.lazyload.imgs.length = 0;
+      if (pageWindow.lazyload && pageWindow.lazyload.imgs) pageWindow.lazyload.imgs.length = 0;
     } catch (e) {}
 
     // 覆盖懒加载构造函数：后续任何 new lazyload() / LazyLoad() 都转为立即全量加载。
     // 必须是普通函数：箭头函数没有 [[Construct]]，页面脚本一旦 new 就直接抛 TypeError
     function fixAll() { forceEagerAll(); }
-    window.LazyLoad = fixAll;
-    window.lazyload = fixAll;
+    pageWindow.LazyLoad = fixAll;
+    pageWindow.lazyload = fixAll;
 
     // 拦截 IntersectionObserver：IMG observe 时立即修 + 手动以"已可见"状态触发回调
-    const OriginalIO = window.IntersectionObserver;
+    const OriginalIO = pageWindow.IntersectionObserver;
     if (!OriginalIO) return;
-    window.IntersectionObserver = function(callback, options) {
+    pageWindow.IntersectionObserver = function(callback, options) {
       const observer = new OriginalIO(callback, options);
       const originalObserve = observer.observe.bind(observer);
       observer.observe = function(target) {
@@ -473,13 +492,16 @@
       };
       return observer;
     };
-    window.IntersectionObserver.prototype = OriginalIO.prototype;
+    pageWindow.IntersectionObserver.prototype = OriginalIO.prototype;
   }
 
   // 三页通用的懒加载清理：立即清一遍 + 监听新增 + 覆盖构造函数
-  function scrubPageLazyLoad() {
+  // watch=false 跳过 MutationObserver：仅首页使用——mainContainer() 在首页兜底到
+  // document.body，挂 Observer 等于监听整个文档（审计 #10，2026-09-13 回归坐实）；
+  // 实测首页 64 张图零懒加载、无动态新增场景，首轮 forceEagerAll 已全覆盖，不监听
+  function scrubPageLazyLoad(watch = true) {
     forceEagerAll();
-    watchImages();
+    if (watch) watchImages();
     interceptLazyLoad();
   }
 
@@ -1036,7 +1058,8 @@
     removeUnused();
     // v2.3：与其余页面统一，首页同样清一遍懒加载（原先首页漏掉了这一步，
     // 首页若有 loading=lazy 图会停在占位态）
-    scrubPageLazyLoad();
+    // v2.4：watch=false，首页不挂 MutationObserver（见 scrubPageLazyLoad 注释）
+    scrubPageLazyLoad(false);
   }
 
   // ============ 列表页主流程 ============
