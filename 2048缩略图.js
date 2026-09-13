@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048缩略图
 // @namespace    https://bbs.vsbskpo.com/
-// @version      2.7.1
+// @version      2.7
 // @description  视口窗口按需加载缩略图：视口上下各留一段窗口，窗口内的图片立刻加载（视口内的标 fetchpriority=high 优先拿到慢图床的带宽），窗口外的图片进入观察器、滚到附近才加载；10 秒后兜底放行所有尚未激活的缩略图（仅页面可见时执行，后台标签页不预下载）。附带：图床域名 preconnect 预连接、移除占位图与广告、隐藏侧栏、"无 Referer" 请求规避图床防盗链、失败后穿透缓存重试一次、节点复用换图时自动重置状态。v2.6 实测：一页 47 张缩略图共 17.25MB，其中 63% 在首屏 2200px 以下，窗口化后首屏只发 17 张 / 3.51MB。
 // @author       Chevy Yang
 // @match        https://bbs.vsbskpo.com/*
