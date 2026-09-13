@@ -17,8 +17,11 @@
        一、实测基线（2026-09-13，站点 bbs.vsbskpo.com，列表页 thread.php?fid=15&search=img&page=1）
        环境：Chrome 153，视口 1440×709，每次 reload 均带 CDP Page.reload(ignoreCache=true) 绕过 HTTP 缓存。
 
-       1) 页面构成：55 个 <img>，其中 47 张是图床缩略图（a.img9g2026.com 33 张、i.11img.com 14 张），
-          另外 8 个是站内图标/占位图（images/face/none.gif、data: 内联图、空 src）。
+       1) 页面构成：55 个 <img>，其中 47 张是图床缩略图（全部在 a.img9g2026.com），
+          另外 8 个是站内图标/占位图（同源 images/face/none.gif、data: 内联图、空 src）。
+          [2026-09-13 v2.7.1 复核] 早期版本记录的是「a.img9g2026.com 33 张 + i.11img.com 14 张」，
+          现站点已把 11img 的图全部迁走 —— 实测 47 张**全部**落在 a.img9g2026.com，i.11img.com 为 0 张。
+          这 55 张里 48 张进入脚本处理（47 张图床 + 1 张以 / 开头的同源绝对路径图），7 张被 _skip。
        2) 47 张缩略图**全部**是「原生 loading="lazy" + 真实地址已在 src」，
           站点没有小图变体（.thumb / 查询串变形实测均不可用），所以字节量只能靠"少加载"来省。
        3) 用与浏览器一致的请求头（Accept: image/avif,image/webp,...）逐张实测体积：
@@ -156,7 +159,7 @@
         return url + (url.indexOf('?') > -1 ? '&' : '?') + '_r=' + Date.now();
     }
 
-    // 脚本自己写 src/srcset 时打一次性标记：MutationObserver 会看到这次赋值，
+    // 脚本自己写 src 时打一次性标记：MutationObserver 会看到这次赋值，
     // 但它是"脚本行为"而非"站点换图"，不能据此重置调度状态——否则形成
     // 写 → MO 重置 → 重新分类 → 再写的自激循环（v2.6 审计 P1；v2.7 兜底放行
     // 会把全部图推向激活，data-* 分支页面该循环 100% 发作，故必须守卫）
@@ -273,7 +276,7 @@
                     // attributeFilter 里，赋值不产生 mutation record —— selfAssign 打的 _selfWrite
                     // 标记永远无人消费而残留，下一次站点真实换图（src/data-* 变化）时会被重置分支
                     // 误当"脚本自己写的"消费掉并 continue，导致节点复用状态重置被静默跳过
-                    // （2026-09-13 用户 data URI 探针实测坐实；src 在 filter 里所以 L259 无此问题）
+                    // （2026-09-13 用户 data URI 探针实测坐实；src 在 filter 里，所以 src 分支无此问题）
                     if (img._assignedSrcset !== p.value) { img._assignedSrcset = p.value; img.srcset = p.value; }
                 }
             }

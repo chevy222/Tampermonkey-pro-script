@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂缩略图
 // @namespace    http://98tang.com/
-// @version      2.4
+// @version      2.4.1
 // @description  PC版列表页加载移动版缩略图、宽屏布局、清理无用元素；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新并宽屏。
 //   v1.7：彻底移除全部懒加载（含原生 loading=lazy，后台标签页/无布局时也能立即请求）；decoding 统一为 async 不阻塞渲染；缩略图域名 preconnect 预连接提速；移动版请求失败自动重试且只缓存成功结果；列表/搜索/详情三页懒加载清除逻辑合并精简约300行。
 //   v1.8：详情图请求增加反爬拦截页检测与退避重试，被拦截的帖子不再被永久标记、后续可重试。
@@ -26,6 +26,12 @@
 //     ② 首页不再挂常驻 MutationObserver（mainContainer 兜底到 body 等于监听整个文档，
 //        实测首页 64 图零懒加载、无动态新增场景，首轮 forceEagerAll 已全覆盖）；
 //     ③ 非首屏兜底放行 15s → 10s（实测转可见后 10s 内原生 lazy 已取完视口附近的图）。
+//   v2.4.1（2026-09-13 审计第一批剩余项）：
+//     ① 修复审计 #1：listPageMain 改为直接 await 抢跑的 earlyListFetch Promise——旧写法在抢跑
+//        失败时会真的再发一次不带重试的请求（失败结果不写缓存、pending 已删，无复用路径可命中），
+//        失败路径从 1+1+3 次请求降为 1+3 次；
+//     ② 修复审计 #2：createThumbWrap 的张数封顶由硬编码 5 改为 MAX_THUMBS_PER_POST 常量联动，
+//        并在常量注释中标注「CSS 只定义到 n5」的联动约束。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
 // @connect      bhagq.4yl7j.com
@@ -60,6 +66,8 @@
   // 实测触屏模板每个卡片给 2~3 张（30 帖 ≈ 60~61 张图）。注意这是带宽大户：
   // 单页 60 张实测合计 8.0MB（均值 136KB/张），改成 1 可省掉约一半流量，
   // 但会改变版式，故默认保持跟随移动版给出的张数（上限 5 只是防御性封顶）。
+  // ⚠️ THUMB_CSS 只定义了 n1~n5 的宽度规则；把本值调到 5 以上时必须同步补
+  // n6~nN 的 --img-width 规则，否则多出的图会按 5 列宽排导致换行错位
   const MAX_THUMBS_PER_POST = 5;
 
   // 移动版请求失败后的重试次数与退避间隔
@@ -513,7 +521,9 @@
   //   eager true = 首屏（立即请求 + high 优先级）；false = 非首屏（原生懒加载，按需请求）
   function createThumbWrap(urls, tid, eager) {
     const wrap = document.createElement('div');
-    const n = Math.min(Math.max(urls.length, 1), 5);
+    // v2.4.1 修复审计 #2：封顶值与 MAX_THUMBS_PER_POST 联动（原先硬编码 5，
+    // 调常量会导致 slice 给 8 张、class 仍是 n5，按 5 列宽排版错位）
+    const n = Math.min(Math.max(urls.length, 1), MAX_THUMBS_PER_POST);
     wrap.className = 'sehua-thumb n' + n;
     const href = tid ? `https://${location.hostname}/thread-${tid}-1-1.html` : null;
 
@@ -1087,9 +1097,13 @@
     watchAutoLoad(fid, pageNo);
 
     console.log(`[色花堂缩略图] 请求移动版: forum-${fid}-${page}.html`);
-    // 先复用文档开始时抢跑的那次请求（不重试）；无效再走带重试的完整流程
-    let result = await fetchMobileThumbsByPage(fid, pageNo, false);
-    if (!mobileResultOk(result)) {
+    // 直接消费文档开始时抢跑的那个 Promise（v2.4.1 修复审计 #1）。
+    // 旧写法 fetchMobileThumbsByPage(fid, pageNo, false) 有个隐蔽缺陷：抢跑失败时
+    // 缓存未写入、pending 已删除，这次调用不会命中任何复用路径，而是真的再发一次
+    // 「不带重试」的请求——失败路径白付 1 次请求 + 1 个 RTT（最坏 1+1+3=5 次）。
+    // 成功路径下两种写法行为完全一致（命中缓存/pending）；Promise 可重复 await。
+    let result = earlyListFetch ? await earlyListFetch : null;
+    if (!result || !mobileResultOk(result)) {
       console.log('[色花堂缩略图] 抢跑请求无效，改为带重试获取');
       result = await fetchMobileThumbsByPage(fid, pageNo, true);
     }
