@@ -35,7 +35,8 @@
 //   v2.4.2（2026-09-13 审计第二批次清偿，#3/#4/#5/#7/#8/#11/#12/#15）：
 //     ① 搜索页与详情页逐字重复的"强制图片可见"CSS 收敛为 forceVisibleCSS()（#3）；
 //     ② fetchMobileThumbs 内联的 safeid 判定改用已有的 isSafePage()（#4）；
-//     ③ 'sehuaBusyRetry' 字面量提为 BUSY_RETRY_KEY 常量，四处统一（#5）；
+//     ③ 'sehuaBusyRetry' 字面量提为 BUSY_RETRY_KEY 常量，函数内五处引用点全部统一（#5）；
+//        （v2.4.2 初版留下过 `const retryKey = BUSY_RETRY_KEY` 的局部别名，已删除）
 //     ④ watchImages 的 attributeFilter 改由 LAZY_ATTRS 派生，两份清单永不再脱钩（#7）；
 //     ⑤ 详情页重试参数提为 DETAIL_RETRY_TIMES / DETAIL_RETRY_BASE_MS 常量（#8）；
 //     ⑥ visibilitychange 监听改为首次排期兜底时才注册，详情/首页不再常驻空定时器（#11）；
@@ -341,8 +342,14 @@
   }
 
   // 判定一次移动版请求是否解析出有效内容（拦截页/空响应两者皆空）
+  // 防御：调用点分布在入口抢跑、缓存写入、自动加载三处，上游理论上恒返回
+  // { mapping, fallbackTids } 结构（fetchMobileThumbs 四个分支均 resolve、无 reject），
+  // 但 GM API 缺失或异常时仍可能给出 null/undefined/部分字段，这里统一兜住，
+  // 避免把「隐式依赖上游行为」变成整页崩溃（异常会冒泡到 onDomReady 的 try/catch，
+  // 表现为整页缩略图静默消失，极难排查）
   function mobileResultOk(result) {
-    return Object.keys(result.mapping).length > 0 || result.fallbackTids.length > 0;
+    if (!result) return false;
+    return Object.keys(result.mapping || {}).length > 0 || (result.fallbackTids || []).length > 0;
   }
 
   // 带自动重试的获取：瞬时网络抖动或站点反爬拦截页不再导致整页无图
@@ -1057,14 +1064,13 @@
       return false;
     }
 
-    const retryKey = BUSY_RETRY_KEY;
-    let retryCount = parseInt(sessionStorage.getItem(retryKey) || '0');
+    let retryCount = parseInt(sessionStorage.getItem(BUSY_RETRY_KEY) || '0');
     if (retryCount >= MAX_BUSY_RETRY) {
       console.warn(`[色花堂缩略图] 搜索繁忙已重试 ${retryCount} 次，停止自动刷新`);
-      sessionStorage.removeItem(retryKey);
+      sessionStorage.removeItem(BUSY_RETRY_KEY);
       return false;
     }
-    sessionStorage.setItem(retryKey, String(retryCount + 1));
+    sessionStorage.setItem(BUSY_RETRY_KEY, String(retryCount + 1));
     console.log(`[色花堂缩略图] 检测到"搜索繁忙"（第${retryCount + 1}次），4 秒后自动刷新`);
 
     addStyle(PAGE_CSS);
@@ -1151,18 +1157,23 @@
       console.log('[色花堂缩略图] 抢跑请求无效，改为带重试获取');
       result = await fetchMobileThumbsByPage(fid, pageNo, true);
     }
-    console.log(`[色花堂缩略图] 获取到 ${Object.keys(result.mapping).length} 个帖子的缩略图，${result.fallbackTids.length} 个需从详情页加载`);
+    // 防御性解构：带重试流程同样可能给出非预期结果（GM API 缺失/异常、上游改签名）。
+    // 后续全部改用局部变量，不再直接链式访问 result.mapping / result.fallbackTids ——
+    // 否则一处 null 就会让整页缩略图静默消失（异常被 onDomReady 的 catch 吞掉）
+    const mapping = (result && result.mapping) || {};
+    const fallbackTids = (result && result.fallbackTids) || [];
+    console.log(`[色花堂缩略图] 获取到 ${Object.keys(mapping).length} 个帖子的缩略图，${fallbackTids.length} 个需从详情页加载`);
 
     // 对缩略图域名预建连接，加速图片请求（抢跑分支已在文档开始时建过，这里会去重）
-    preconnectImageHosts(result.mapping);
+    preconnectImageHosts(mapping);
 
-    processTable(result.mapping);
+    processTable(mapping);
 
-    if (result.fallbackTids.length > 0) {
+    if (fallbackTids.length > 0) {
       const allTbodies = document.querySelectorAll('#threadlisttableid tbody[id^=normalthread_]');
       const fallbackBatch = Array.from(allTbodies).filter(tb => {
         const tid = tb.id?.match(/\d+/)?.[0];
-        return tid && result.fallbackTids.includes(tid);
+        return tid && fallbackTids.includes(tid);
       });
       if (fallbackBatch.length > 0) {
         loadFallbackThumbs(fallbackBatch);
@@ -1181,8 +1192,13 @@
   if (earlyPageInfo.fid) {
     earlyListFetch = fetchMobileThumbsByPage(earlyPageInfo.fid, parseInt(earlyPageInfo.page), false);
     // 请求一返回就先握手缩略图 CDN，把 DNS/TCP/TLS 也挪到 DOM 之前的并行窗口里
+    // catch 必须补：GM API 缺失或抛同步异常时这个 Promise 会 reject，
+    // 没有 catch 就是 unhandled rejection（控制台噪音，且掩盖真实失败原因）。
+    // 这里失败无需处理——DOM 就绪后 listPageMain 仍会用带重试的流程重取一次
     earlyListFetch.then(result => {
       if (mobileResultOk(result)) preconnectImageHosts(result.mapping);
+    }).catch(err => {
+      console.warn('[色花堂缩略图] 抢跑请求异常，忽略（DOM 就绪后会带重试重取）:', err);
     });
   }
 
