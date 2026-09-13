@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂缩略图
 // @namespace    http://98tang.com/
-// @version      2.4
+// @version      2.5
 // @description  PC版列表页加载移动版缩略图、宽屏布局、清理无用元素；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新并宽屏；列表页按真实视口几何判定首屏优先加载，非首屏按需加载以节省带宽。
 //   v1.7：彻底移除全部懒加载（含原生 loading=lazy，后台标签页/无布局时也能立即请求）；decoding 统一为 async 不阻塞渲染；缩略图域名 preconnect 预连接提速；移动版请求失败自动重试且只缓存成功结果；列表/搜索/详情三页懒加载清除逻辑合并精简约300行。
 //   v1.8：详情图请求增加反爬拦截页检测与退避重试，被拦截的帖子不再被永久标记、后续可重试。
@@ -32,11 +32,11 @@
 //        失败路径从 1+1+3 次请求降为 1+3 次；
 //     ② 修复审计 #2：createThumbWrap 的张数封顶由硬编码 5 改为 MAX_THUMBS_PER_POST 常量联动，
 //        并在常量注释中标注「CSS 只定义到 n5」的联动约束。
-//   v2.4.2（2026-09-13 审计第二批次清偿，#3/#4/#5/#7/#8/#11/#12/#15）：
+//   v2.5（2026-09-13 审计第二批次清偿，#3/#4/#5/#7/#8/#11/#12/#15）：
 //     ① 搜索页与详情页逐字重复的"强制图片可见"CSS 收敛为 forceVisibleCSS()（#3）；
 //     ② fetchMobileThumbs 内联的 safeid 判定改用已有的 isSafePage()（#4）；
 //     ③ 'sehuaBusyRetry' 字面量提为 BUSY_RETRY_KEY 常量，函数内五处引用点全部统一（#5）；
-//        （v2.4.2 初版留下过 `const retryKey = BUSY_RETRY_KEY` 的局部别名，已删除）
+//        （v2.5 初版留下过 `const retryKey = BUSY_RETRY_KEY` 的局部别名，已删除）
 //     ④ watchImages 的 attributeFilter 改由 LAZY_ATTRS 派生，两份清单永不再脱钩（#7）；
 //     ⑤ 详情页重试参数提为 DETAIL_RETRY_TIMES / DETAIL_RETRY_BASE_MS 常量（#8）；
 //     ⑥ visibilitychange 监听改为首次排期兜底时才注册，详情/首页不再常驻空定时器（#11）；
@@ -95,7 +95,7 @@
   // 过滤开关状态的 localStorage 键名
   const FILTER_STORAGE_KEY = 'sehuaFilterState';
 
-  // 搜索繁忙重试计数的 sessionStorage 键名（v2.4.2 提为常量，原三处字面量 + 一处局部变量）
+  // 搜索繁忙重试计数的 sessionStorage 键名（v2.5 提为常量，原三处字面量 + 一处局部变量）
   const BUSY_RETRY_KEY = 'sehuaBusyRetry';
 
   // 所有可能的懒加载属性（按优先级排序）
@@ -147,7 +147,7 @@
   }
 
   // 排期兜底（已排则不重复排，避免持续新增导致永不触发）
-  // v2.4.2（审计 #11）：visibilitychange 监听改为首次排期时才注册——原先在 IIFE 顶层
+  // v2.5（审计 #11）：visibilitychange 监听改为首次排期时才注册——原先在 IIFE 顶层
   // 无条件注册，详情页/首页这类根本不会创建 lazy 缩略图的页面也常驻，每次切回前台
   // 都白排一个 10s 定时器。懒注册后只有真正用上按需加载的页面（列表/搜索）才有此开销
   let visibilityBound = false;
@@ -295,7 +295,7 @@
             const thumbs = doc.querySelectorAll('.n5_htmk');
             if (thumbs.length === 0) {
               // 空结果的两种根因要区分开：反爬拦截页 vs 自定义 UA 头未生效拿到 PC 版
-              // （v2.4.2 起复用 isSafePage，原先这里又内联写了一遍 indexOf —— 审计 #4）
+              // （v2.5 起复用 isSafePage，原先这里又内联写了一遍 indexOf —— 审计 #4）
               if (isSafePage(resp.responseText)) {
                 console.error('[色花堂缩略图] 移动版请求疑似被反爬拦截页挡下:', url);
               } else {
@@ -402,7 +402,7 @@
   }
 
   // 强制容器内所有图片立即可见的页面级 CSS
-  // （v2.4.2 收敛审计 #3：搜索页 #threadlist 与详情页 #postlist 原各写一份，
+  // （v2.5 收敛审计 #3：搜索页 #threadlist 与详情页 #postlist 原各写一份，
   //   四行内容逐字相同仅选择器不同；站点对懒加载图加 visibility:hidden 等图出来再显示）
   function forceVisibleCSS(selector) {
     return `
@@ -481,7 +481,7 @@
     });
     // v2.3：attributeFilter 去掉 'class'。每张缩略图加载完都会 classList.remove('sehua-loading')，
     // 分页/筛选也会成片改 class，而 forceEagerImg 只依赖 src / 懒加载属性，监听 class 纯属噪音。
-    // v2.4.2（审计 #7）：地址属性清单改由 LAZY_ATTRS 派生，与 getRealSrc 的探测表永不再脱钩
+    // v2.5（审计 #7）：地址属性清单改由 LAZY_ATTRS 派生，与 getRealSrc 的探测表永不再脱钩
     // （原先手写 8 个、与 LAZY_ATTRS 的 9 个不同步，data-thumb 等变化会漏监听）；
     // 其余 4 个是状态属性：src/lazy/loadsrc 是站点脚本会改写的，data-lazy 是 forceEagerImg
     // 自己会 removeAttribute 的。均为现清单的超集，只会多触发幂等回调，不会漏。
@@ -494,6 +494,9 @@
   }
 
   // 拦截 Discuz 懒加载（三页共用）
+  // 注解（2026-09-13 回归实测）：本覆盖对列表页属防御性冗余——实测列表页 107 张 img
+  // 全部是 static/image 占位图，PC 模板不依赖 lazyload/IO。保留是为防详情/搜索页
+  // 之外的未知动态场景；副作用可控：非 IMG 元素的 observe 仍走原生 IO（见下）。
   // v2.4 沙箱修复：脚本带 @grant（沙箱模式）时，脚本内的 window 是包装对象——读取页面
   // 全省会透传，但纯赋值（window.x = y）只写进沙箱，页面侧完全看不到。2026-09-13 回归
   // 实测坐实：详情页页面上下文中 window.lazyload 仍是站点原库（function lazyload(className)
@@ -600,7 +603,7 @@
       img.addEventListener('load', onload, { once: true });
       img.addEventListener('error', onerror, { once: true });
 
-      // 缓存兜底（v2.4.2 审计 #15：两分支对称）：complete 为 true 后不会再触发
+      // 缓存兜底（v2.5 审计 #15：两分支对称）：complete 为 true 后不会再触发
       // load/error 事件——naturalWidth === 0 是被浏览器缓存住的失败结果，必须直接
       // 走 onerror，否则该图会带着 shimmer 占位永远卡住。lazy 图在预取距离内时
       // 同样可能立即命中缓存完成，事件或已派发完毕，监听器收不到回调。
@@ -1024,7 +1027,7 @@
       ${THUMB_CSS}
       .sehua-loading { color: #999; font-size: 12px; text-align: center; padding: 8px; }
       .slst.mtw { width: 100% !important; }
-      /* 搜索页：强制所有图片立即显示（v2.4.2 收敛，见 forceVisibleCSS） */
+      /* 搜索页：强制所有图片立即显示（v2.5 收敛，见 forceVisibleCSS） */
       ${forceVisibleCSS('#threadlist')}
     `);
 
@@ -1102,7 +1105,7 @@
       #postlist { width: 100% !important; }
       #postlist ignore_js_op img.zoom { display: block; margin-left: auto; margin-right: auto; }
       #postlist ignore_js_op { text-align: center; }
-      /* 详情页：强制所有图片立即显示（v2.4.2 收敛，见 forceVisibleCSS） */
+      /* 详情页：强制所有图片立即显示（v2.5 收敛，见 forceVisibleCSS） */
       ${forceVisibleCSS('#postlist')}
     `);
 
