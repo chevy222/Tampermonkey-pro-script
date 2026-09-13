@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         2048缩略图
 // @namespace    https://bbs.vsbskpo.com/
-// @version      2.6
-// @description  视口窗口按需加载缩略图：视口上下各留一段窗口，窗口内的图片立刻加载（视口内的标 fetchpriority=high 优先拿到慢图床的带宽），窗口外的图片进入观察器、滚到附近才加载，不再整页预载。附带：移除占位图与广告、隐藏侧栏、"无 Referer" 请求规避图床防盗链、失败后穿透缓存重试一次、节点复用换图时自动重置状态。v2.6 实测：一页 47 张缩略图共 17.25MB，其中 63% 在首屏 2200px 以下，全量预载纯属浪费；改为窗口化后首屏只发 17 张 / 3.51MB。
+// @version      2.7
+// @description  视口窗口按需加载缩略图：视口上下各留一段窗口，窗口内的图片立刻加载（视口内的标 fetchpriority=high 优先拿到慢图床的带宽），窗口外的图片进入观察器、滚到附近才加载；10 秒后兜底放行所有尚未激活的缩略图（仅页面可见时执行，后台标签页不预下载）。附带：图床域名 preconnect 预连接、移除占位图与广告、隐藏侧栏、"无 Referer" 请求规避图床防盗链、失败后穿透缓存重试一次、节点复用换图时自动重置状态。v2.6 实测：一页 47 张缩略图共 17.25MB，其中 63% 在首屏 2200px 以下，窗口化后首屏只发 17 张 / 3.51MB。
 // @author       Chevy Yang
 // @match        https://bbs.vsbskpo.com/*
 // @noframes
@@ -63,6 +63,23 @@
        继续往下滚才会依次加载后面几屏，流量与实际浏览深度成正比。
        代价是明确的：如果你一口气拉到页面底部，最终仍会加载全部 17.25MB，只是发生在滚动过程中，
        且因为窗口比视口大 1200px，正常滚动速度下不会看到明显空位。
+
+       四、v2.7 的变化（2026-09-13 用户需求）
+       1) 兜底放行（RELEASE_ALL_MS = 10s）：DOM 就绪 10 秒后，把所有"已分类但尚未被窗口机制激活"
+          的缩略图一次性放行（仅页面可见时执行；后台标签页不放行，转可见后补排一次）。
+          ⚠️ 这是对 v2.6"不为看不到的内容付费"的**有意回撤**，换取"开着页面慢慢看时不用等图"：
+          页面停留超过 10s 即全量下载（实测 47 张 / 17.25MB，63% 在首屏以下）。把它改成 0
+          即可恢复 v2.6 的纯窗口按需加载。窗口机制本身不变，前 10 秒的省流收益仍然保留。
+       2) 图床域名 preconnect：首次处理到某个图床域名的图片时立即插入 <link rel=preconnect>
+          （DNS+TCP+TLS 提前握手，不加 crossorigin——普通 <img> 非 CORS 请求）。
+          注意收益与色花堂不同：那边的缩略图地址来自 GM 请求、注入前有明确的提前窗口；
+          本站图片地址就在页面 HTML 的 src 里，浏览器 preload scanner 见到即会连接，
+          preconnect 的真实收益在「窗口内没出现过的图床域名」——兜底放行/滚动加载触发时
+          免掉一次握手（本站图床单张 3~5s，握手省下的几百 ms 有感）。
+       3) 修复 v2.6 审计 P1（src 自激）：脚本自己写 src 会触发 MutationObserver 的状态重置分支，
+          形成写→重置→重写循环；兜底放行把全部图推向激活后，data-* 分支页面会 100% 发作，
+          故新增 selfAssign() 打一次性标记，MO 消费标记后跳过重置。顺带修 L386 错误注释
+          （_scheduled → _activated）与 L211 冗余 removeAttribute（反射属性赋值已覆盖）。
        ========================================================================== */
 
     // ---- 加载窗口参数（想过更激进/更保守就只改这两个）----
@@ -72,6 +89,12 @@
 
     var FALLBACK_INTERVAL = 3000;   // 兜底轮询周期（清理漏网广告 + 补处理漏网图片）
     var FALLBACK_IDLE_STOP = 20;    // 连续这么多个周期没活干就自停（20 × 3s = 60s）
+
+    // 兜底放行：DOM 就绪后这么多毫秒，把所有尚未被窗口机制激活的缩略图一次性放行。
+    // 语义对齐《色花堂缩略图》：仅页面可见时执行（后台标签页不替用户下载整页图），
+    // 页面从隐藏恢复可见时补排一次。设为 0 可关闭，恢复 v2.6 的纯窗口按需加载。
+    // ⚠️ 开启即放弃"停留不滚不动也只付前 10 秒流量"——10s 后整页 17.25MB 会照单全收
+    var RELEASE_ALL_MS = 10000;
 
     // 广告 / 无用块。合并成单个选择器：解析期每个新增节点都要判定一次，一次 matches 远优于 N 次循环
     var AD_SELECTORS = ['.recs-wrapper', '.recs-head', '.recs-row', '.recs-pill', '.nav-container'];
@@ -125,6 +148,36 @@
         return url + (url.indexOf('?') > -1 ? '&' : '?') + '_r=' + Date.now();
     }
 
+    // 脚本自己写 src/srcset 时打一次性标记：MutationObserver 会看到这次赋值，
+    // 但它是"脚本行为"而非"站点换图"，不能据此重置调度状态——否则形成
+    // 写 → MO 重置 → 重新分类 → 再写的自激循环（v2.6 审计 P1；v2.7 兜底放行
+    // 会把全部图推向激活，data-* 分支页面该循环 100% 发作，故必须守卫）
+    function selfAssign(img, prop, value) {
+        img._selfWrite = true;
+        img[prop] = value;
+    }
+
+    // 图床域名预连接（v2.7）：首次处理到某图床域名的图片时插入 preconnect，
+    // 把 DNS+TCP+TLS 提前到窗口外图片真正激活之前。按 origin 去重。
+    // 不加 crossorigin：本站缩略图是普通 <img>（非 CORS 请求），加了反而多建一条连接。
+    // 注：图片地址已在页面 HTML src 里，浏览器 preload scanner 见到即连接，此处的
+    // 增量收益是"窗口内没出现过的域名"——兜底放行/滚动加载触发时免掉一次握手
+    var preconnectedHosts = {};
+    function preconnectImgHost(img) {
+        var src = img.getAttribute('src') || '';
+        if (src.indexOf('http') !== 0 && src.indexOf('//') !== 0) return;
+        try {
+            var u = new URL(src, location.href);
+            if (u.host === location.host) return;
+            if (preconnectedHosts[u.origin]) return;
+            preconnectedHosts[u.origin] = true;
+            var link = document.createElement('link');
+            link.rel = 'preconnect';
+            link.href = u.origin;
+            (document.head || document.documentElement).appendChild(link);
+        } catch (e) {}
+    }
+
     function applyFailedStyle(img) {
         img.classList.add('lazy-failed');
         img.onerror = function () {};
@@ -133,7 +186,7 @@
             img.classList.remove('lazy-failed');
             img.referrerPolicy = 'no-referrer';
             img.onload = function () { img.classList.remove('lazy-failed'); };
-            img.src = bustCache(img._origSrc);
+            selfAssign(img, 'src', bustCache(img._origSrc));
         };
     }
 
@@ -150,7 +203,7 @@
             img.referrerPolicy = 'no-referrer';
             img.onerror = function () { applyFailedStyle(img); };
             img.onload = function () { img.classList.remove('lazy-failed'); };
-            img.src = bustCache(img._origSrc);
+            selfAssign(img, 'src', bustCache(img._origSrc));
             return;
         }
         applyFailedStyle(img);
@@ -203,13 +256,12 @@
                 var p = img._plan;
                 img._plan = null;
                 if (p.kind === 'src') {
-                    if (img._assignedSrc !== p.value) { img._assignedSrc = p.value; img.src = p.value; }
+                    if (img._assignedSrc !== p.value) { img._assignedSrc = p.value; selfAssign(img, 'src', p.value); }
                 } else {
-                    if (img._assignedSrcset !== p.value) { img._assignedSrcset = p.value; img.srcset = p.value; }
+                    if (img._assignedSrcset !== p.value) { img._assignedSrcset = p.value; selfAssign(img, 'srcset', p.value); }
                 }
             }
-            if (img.getAttribute('loading') === 'lazy') img.removeAttribute('loading');
-            img.loading = 'eager';
+            img.loading = 'eager';   // 反射属性：赋值即把 content attribute 写成 eager，无需先 removeAttribute
             return;
         }
         if (priority === 'high' && img.fetchPriority !== 'high') img.fetchPriority = 'high';
@@ -268,6 +320,8 @@
         // 规避图床防盗链导致的"页内灰底、直开秒出"；decoding=async 避免解码阻塞渲染
         img.referrerPolicy = 'no-referrer';
         img.decoding = 'async';
+        // 图床域名预连接（内部按 origin 去重，重复调用开销可忽略）
+        preconnectImgHost(img);
 
         if (plan.kind === 'src' || plan.kind === 'srcset') {
             // 真实地址先挂在 _plan 上，等窗口判定通过、真正要发请求时才写进 src/srcset
@@ -383,9 +437,11 @@
                 var t = mutation.target;
                 if (t.tagName === 'IMG') {
                     // 懒加载源变化 = 节点复用换图：旧的重试地址/调度状态全部失效，
-                    // 否则失败会拿旧图重试，且已 load 之后复用的原生 lazy 图会被 _scheduled 卡死永不激活。
+                    // 否则失败会拿旧图重试，且已 load 之后复用的原生 lazy 图会被 _activated 卡死永不激活。
                     // _skip 也要清掉：被跳过之后又补上了真实地址的图需要重新评估
                     if (RESET_ATTRS.indexOf(mutation.attributeName) > -1) {
+                        // selfAssign 的一次性标记：这是脚本自己写的属性，不是站点换图，跳过重置
+                        if (t._selfWrite) { t._selfWrite = false; continue; }
                         t._forceLoaded = false;
                         t._markedFailed = false;
                         t._assignedSrc = null;
@@ -419,9 +475,46 @@
     }
     startObserver();
 
+    // ---- 兜底放行（v2.7，对齐色花堂语义）----
+    // DOM 就绪 RELEASE_ALL_MS 后，把所有"已分类但尚未被窗口机制激活"的缩略图一次性放行。
+    // 仅页面可见时执行：后台标签页里替用户下载整页 17.25MB 才是真浪费；
+    // 隐藏期间定时器到期则放弃本次，由 visibilitychange 在页面转可见后补排一次。
+    // 只放行 _forceLoaded 且未 _activated 且未 _skip 的图：占位图不碰、
+    // 未分类的新图（理论上不存在，兜底轮询已覆盖）交给原有机制。
+    var releaseTimer = null;
+
+    function releaseAllImages() {
+        releaseTimer = null;
+        if (document.visibilityState !== 'visible') return;
+        var imgs = document.images;
+        for (var i = 0; i < imgs.length; i++) {
+            var im = imgs[i];
+            if (im._forceLoaded && !im._activated && !im._skip) {
+                activateImage(im, null);   // 不下发优先级：视口内的早已被 ioView 提过 high
+            }
+        }
+    }
+
+    function scheduleReleaseAll() {
+        if (releaseTimer || !RELEASE_ALL_MS) return;
+        releaseTimer = setTimeout(releaseAllImages, RELEASE_ALL_MS);
+    }
+
+    if (RELEASE_ALL_MS) {
+        document.addEventListener('visibilitychange', function () {
+            if (document.visibilityState === 'visible') scheduleReleaseAll();
+        });
+    }
+
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function () { processAll(document); });
-    } else { processAll(document); }
+        document.addEventListener('DOMContentLoaded', function () {
+            processAll(document);
+            scheduleReleaseAll();
+        });
+    } else {
+        processAll(document);
+        scheduleReleaseAll();
+    }
 
     // 兜底轮询：清理漏网广告 + 补处理漏网图片（比如解析结束后才被插入、且 MutationObserver 漏掉的）；
     // 连续空闲 20 个周期后自停，之后动态新增仍由 MutationObserver 接管
