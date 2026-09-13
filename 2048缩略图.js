@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048缩略图
 // @namespace    https://bbs.vsbskpo.com/
-// @version      2.7
+// @version      2.7.1
 // @description  视口窗口按需加载缩略图：视口上下各留一段窗口，窗口内的图片立刻加载（视口内的标 fetchpriority=high 优先拿到慢图床的带宽），窗口外的图片进入观察器、滚到附近才加载；10 秒后兜底放行所有尚未激活的缩略图（仅页面可见时执行，后台标签页不预下载）。附带：图床域名 preconnect 预连接、移除占位图与广告、隐藏侧栏、"无 Referer" 请求规避图床防盗链、失败后穿透缓存重试一次、节点复用换图时自动重置状态。v2.6 实测：一页 47 张缩略图共 17.25MB，其中 63% 在首屏 2200px 以下，窗口化后首屏只发 17 张 / 3.51MB。
 // @author       Chevy Yang
 // @match        https://bbs.vsbskpo.com/*
@@ -80,6 +80,14 @@
           形成写→重置→重写循环；兜底放行把全部图推向激活后，data-* 分支页面会 100% 发作，
           故新增 selfAssign() 打一次性标记，MO 消费标记后跳过重置。顺带修 L386 错误注释
           （_scheduled → _activated）与 L211 冗余 removeAttribute（反射属性赋值已覆盖）。
+
+       五、v2.7.1（2026-09-13，用户探针实测发现）
+       srcset 分支误用 selfAssign 导致 _selfWrite 标记残留：srcset 不在 attributeFilter 里，
+       赋值不产生 mutation record，标记永远无人消费；下一次站点真实换图时该残留标记被重置分支
+       消费并 continue，节点复用的状态重置被静默跳过（v2.6 机制失效一次）。修法：srcset 恢复
+       直接赋值（本就不需要标记），selfAssign 注释补上"仅限 filter 内属性"的约束。
+       用户实测方法：data URI 探针确保 load 成功（排除失败重试的 src 写入消费标记的干扰），
+       验证 _selfWrite 残留为 true、模拟换图后 _forceLoaded 未被重新写入。
        ========================================================================== */
 
     // ---- 加载窗口参数（想过更激进/更保守就只改这两个）----
@@ -152,6 +160,9 @@
     // 但它是"脚本行为"而非"站点换图"，不能据此重置调度状态——否则形成
     // 写 → MO 重置 → 重新分类 → 再写的自激循环（v2.6 审计 P1；v2.7 兜底放行
     // 会把全部图推向激活，data-* 分支页面该循环 100% 发作，故必须守卫）
+    // ⚠️ 只能用于 attributeFilter 内的属性（当前仅 src）：标记依赖 MO 的 attributes
+    // 回调来消费，filter 外的属性（如 srcset）赋值不产生 record，标记会永久残留，
+    // 反而吞掉下一次真实换图的重置信号（v2.7.1 修复的 srcset 标记残留缺陷）
     function selfAssign(img, prop, value) {
         img._selfWrite = true;
         img[prop] = value;
@@ -258,7 +269,12 @@
                 if (p.kind === 'src') {
                     if (img._assignedSrc !== p.value) { img._assignedSrc = p.value; selfAssign(img, 'src', p.value); }
                 } else {
-                    if (img._assignedSrcset !== p.value) { img._assignedSrcset = p.value; selfAssign(img, 'srcset', p.value); }
+                    // srcset 必须直接赋值、不能走 selfAssign：srcset 不在 MutationObserver 的
+                    // attributeFilter 里，赋值不产生 mutation record —— selfAssign 打的 _selfWrite
+                    // 标记永远无人消费而残留，下一次站点真实换图（src/data-* 变化）时会被重置分支
+                    // 误当"脚本自己写的"消费掉并 continue，导致节点复用状态重置被静默跳过
+                    // （2026-09-13 用户 data URI 探针实测坐实；src 在 filter 里所以 L259 无此问题）
+                    if (img._assignedSrcset !== p.value) { img._assignedSrcset = p.value; img.srcset = p.value; }
                 }
             }
             img.loading = 'eager';   // 反射属性：赋值即把 content attribute 写成 eager，无需先 removeAttribute
