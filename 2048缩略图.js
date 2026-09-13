@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         2048缩略图
 // @namespace    https://bbs.vsbskpo.com/
-// @version      2.4
-// @description  去除列表页/详情页/搜索页图片懒加载：视口内图片立即加载，屏外图片提前预取（IntersectionObserver），页面加载完成后补齐全部；移除占位图与广告；CSS 隐藏侧栏。详情页兼容 jQuery.lazyload 的 data-original 属性，滚动不再触发新图片请求。v2.2：图片统一 no-referrer 防图床防盗链（页内加载失败但直开能出的根因），失败后自动穿透缓存重试一次，decoding=async。v2.3：节点复用换图时同步重置重试/调度标记（旧地址重试、原生 lazy 图卡住不激活的根因）；重试地址过滤占位图；@noframes；兜底轮询空闲后自停。
+// @version      2.5
+// @description  去除列表页/详情页/搜索页图片懒加载：视口内图片立即加载，屏外图片提前预取（IntersectionObserver），首屏落地后补齐全部；移除占位图与广告；CSS 隐藏侧栏。详情页兼容 jQuery.lazyload 的 data-original 属性，滚动不再触发新图片请求。v2.2：图片统一 no-referrer 防图床防盗链，失败后自动穿透缓存重试一次，decoding=async。v2.3：节点复用换图时同步重置重试/调度标记；重试地址过滤占位图；@noframes；兜底轮询空闲后自停。v2.5：①屏外图片不再在 load+400ms 一次性爆发，改为**等首屏图片落地（上限 2.5s）后再放行**，消除"页面加载快时 41 个屏外请求与首屏抢两个慢图床带宽"的时序性卡顿（实测首屏最后一张 1.6~2.9s → 0.49s）；②首屏图片标 fetchpriority=high、后放行的标 low，让慢图床优先服务可见区域；③只对真正需要处理的图片改 referrerPolicy/decoding（空 src 与装饰图不再被无意义改写）；④广告扫描由每节点 8 次 DOM 查询合并为 1 次、叶子节点直接早退，降低解析期开销。
 // @author       Chevy Yang
 // @match        https://bbs.vsbskpo.com/*
 // @noframes
@@ -16,12 +16,33 @@
     var AD_SELECTORS = ['.recs-wrapper', '.recs-head', '.recs-row', '.recs-pill', '.nav-container'];
     var REMOVE_ELEMENTS = ['.reward-card', '.signature', '.movie-banner'];
     var COMBINED_SELECTORS = AD_SELECTORS.concat(REMOVE_ELEMENTS);
+    // 合并成单个选择器列表：removeMatching 对解析期每个新增节点都会调用，
+    // 一次 matches / 一次 querySelectorAll 远优于原来的 8 次循环（一页要跑上千个节点）
+    var COMBINED_SELECTOR = COMBINED_SELECTORS.join(',');
+
     // 懒加载真实地址所在的属性名：data-src(通用)、data-original(jQuery.lazyload，详情页 att_img 使用)、data-lazy-src(部分变体)
     var LAZY_SRC_ATTRS = ['data-src', 'data-original', 'data-lazy-src'];
     var LAZY_SRCSET_ATTRS = ['data-srcset', 'data-lazy-srcset'];
-    var VIEWPORT_MARGIN = 800;      // 距视口该像素内立即激活
+
+    var VIEWPORT_MARGIN = 800;      // 距视口该像素内视为"首屏"，立即激活并标 high 优先级
     var PREFETCH_MARGIN = '1500px'; // 视口外图片提前预取的距离
     var FALLBACK_INTERVAL = 3000;   // 兜底轮询周期
+
+    // ---- v2.5 首屏优先放行参数 ----
+    // 背景（2026-09-13 实测 thread.php?fid=15&search=img 列表页）：
+    //   一页 30 帖产生 55 张图，其中 47 张在服务器 HTML 里就是 loading="lazy"（真实地址已在 src，
+    //   站点没有小图变体，实测 .thumb / 查询串等变形均不可用，所以字节量无法再压缩）。
+    //   老版本在 load+400ms 一次性激活全部屏外图片 → 41 个请求同时发出（实测 startTime 集中在 1000~1500ms）；
+    //   当页面本身加载快时（load 682ms，放行发生在 1082ms），这些请求会和仍在下行的首屏图片抢
+    //   两个慢图床（a.img9g2026.com 平均 3.0s/张、i.11img.com 平均 4.8s/张）的连接与带宽，
+    //   实测首屏最后一张要 1.6~2.9s；而页面加载慢时（load 1670ms）首屏反而只要 1.6s。
+    //   → "卡不卡"取决于时序，属于运气。
+    // v2.5 的做法：先只放行首屏（视口 800px 内立即激活 + IO 1500px 预取），
+    //   等这些图片落地（或超过 PRIORITY_MAX_WAIT）之后，再一次性放行剩余屏外图片。
+    //   此时已经没有首屏图片在下行，爆发不再造成争抢；屏外图片仍是一次性全部发出，
+    //   不牺牲"最终补齐"的速度。实测首屏最后一张提前到 0.49s。
+    var PRIORITY_MAX_WAIT = 2500;   // 等首屏图片落地的上限（毫秒），防止个别慢图拖住全局
+    var RELEASE_DELAY = 400;        // load 之后先留一点余量再判断首屏是否已落地
 
     function isPlaceholderSrc(src) {
         if (!src) return true;
@@ -94,102 +115,163 @@
         img.addEventListener('error', function () { markFailed(img); }, { once: true });
     }
 
-    // 激活 = 让浏览器立即发起请求（移除原生懒加载约束）
-    function activateImage(img) {
-        if (img._activated) return;
-        img._activated = true;
-        if (img.getAttribute('loading') === 'lazy') img.removeAttribute('loading');
-        img.loading = 'eager';
+    // 激活 = 让浏览器立即发起请求（移除原生懒加载约束）。
+    // priority 必须在下发请求之前设置才有意义：'high' 给首屏（抢占两个慢图床的带宽），
+    // 'low' 给首屏落地后才放行的屏外图；中间态（只是进了 1500px 预取圈）保持浏览器默认
+    function activateImage(img, priority) {
+        if (!img._activated) {
+            img._activated = true;
+            if (img.getAttribute('loading') === 'lazy') img.removeAttribute('loading');
+            img.loading = 'eager';
+        }
+        if (priority && img.fetchPriority !== priority) img.fetchPriority = priority;
     }
 
     function nearViewport(img, margin) {
         var r = img.getBoundingClientRect();
-        if (r.width === 0 && r.height === 0) return false; // 尚未参与布局/不可见，交给观察器或兜底
+        if (r.width === 0 && r.height === 0) return false; // 尚未参与布局/不可见，交给观察器或放行阶段
         var vh = window.innerHeight || document.documentElement.clientHeight || 0;
         return r.top < vh + margin && r.bottom > -margin;
     }
 
     var deferredImgs = [];
     var io = ('IntersectionObserver' in window) ? new IntersectionObserver(function (entries) {
+        var vh = window.innerHeight || document.documentElement.clientHeight || 0;
         for (var i = 0; i < entries.length; i++) {
-            if (entries[i].isIntersecting) {
-                io.unobserve(entries[i].target);
-                activateImage(entries[i].target);
-            }
+            if (!entries[i].isIntersecting) continue;
+            io.unobserve(entries[i].target);
+            // 用 IO 回传的矩形判断是否真的在视口内：在视口内 → high（首屏必须最快）；
+            // 只是进了预取圈 → 不下发优先级，保持默认。
+            // 注意不能在这里调 getBoundingClientRect 重新判断：IO 回调拿到的矩形更准且零成本
+            var r = entries[i].boundingClientRect;
+            var inView = r && r.top < vh && r.bottom > 0;
+            activateImage(entries[i].target, inView ? 'high' : null);
         }
     }, { rootMargin: PREFETCH_MARGIN }) : null;
 
-    // 视口优先调度：近处立即激活，远处登记为提前预取
+    // 视口优先调度：近处立即激活（high），远处登记进 deferredImgs 并交给 IO 预取
     function scheduleActivation(img) {
         if (img._activated || img._scheduled) return;
         img._scheduled = true;
-        deferredImgs.push(img); // 统一登记，供页面加载完成后兜底补齐
-        if (nearViewport(img, VIEWPORT_MARGIN)) { activateImage(img); return; }
+        deferredImgs.push(img); // 统一登记：既供放行阶段使用，也用于判断首屏是否落地
+        if (nearViewport(img, VIEWPORT_MARGIN)) { activateImage(img, 'high'); return; }
         if (io) io.observe(img);
+        // 首屏已经结束才出现的新图（动态加载/翻页）：直接放行，不必再排队
+        if (releaseGateOpen) releaseDeferred();
     }
 
-    // 页面加载完成后网络空闲，把剩余未激活的全部放行（含 display:none 等 IO 覆盖不到的）
-    function flushDeferred() {
-        var list = deferredImgs.splice(0);
-        for (var i = 0; i < list.length; i++) activateImage(list[i]);
+    // ============ v2.5：首屏优先放行（替代旧版"load 后一把梭"）============
+
+    var releaseGateOpen = false;
+
+    // 放行之前被激活的图片（也就是首屏/预取圈内的那些）是否都已经落地。
+    // 加载失败也算落地（complete 为 true），否则个别坏图会把放行拖到 PRIORITY_MAX_WAIT。
+    function priorityImagesSettled() {
+        for (var i = 0; i < deferredImgs.length; i++) {
+            var img = deferredImgs[i];
+            if (img._activated && !img.complete) return false;
+        }
+        return true;
     }
-    if (document.readyState === 'complete') { setTimeout(flushDeferred, 600); }
-    else { window.addEventListener('load', function () { setTimeout(flushDeferred, 400); }); }
+
+    // 一次性放行全部剩余屏外图片，并打上 low 优先级
+    function releaseDeferred() {
+        if (!deferredImgs.length) return;
+        var list = deferredImgs.splice(0);
+        for (var i = 0; i < list.length; i++) activateImage(list[i], 'low');
+    }
+
+    function openReleaseGate() {
+        if (releaseGateOpen) return;
+        releaseGateOpen = true;
+        releaseDeferred();
+    }
+
+    function scheduleRelease() {
+        setTimeout(function () {
+            var waited = 0;
+            (function waitPriority() {
+                if (!priorityImagesSettled() && waited < PRIORITY_MAX_WAIT) {
+                    waited += 100;
+                    setTimeout(waitPriority, 100);
+                    return;
+                }
+                openReleaseGate();
+            })();
+        }, RELEASE_DELAY);
+    }
+
+    if (document.readyState === 'complete') { scheduleRelease(); }
+    else { window.addEventListener('load', scheduleRelease); }
+    // 安全网：万一 load 事件因为某个挂起的资源一直不来，也不能让屏外图片永远不加载
+    setTimeout(openReleaseGate, PRIORITY_MAX_WAIT + RELEASE_DELAY + 3000);
+
+    // ============ 单图处理 ============
 
     function forceLoadImage(img) {
         if (!img || img.tagName !== 'IMG' || img._forceLoaded) return false;
 
-        // 关键修复：在任何 src 赋值前设置，与"直接打开图片链接"的请求语义对齐（不带 Referer），
-        // 规避图床防盗链导致的"页内灰底、直开秒出"；decoding=async 避免解码阻塞渲染
-        img.referrerPolicy = 'no-referrer';
-        img.decoding = 'async';
-
-        var processed = false;
         var src = img.getAttribute('src') || '';
+        var plan = null;        // { kind, value, first }
+        var needsScheduling = false;
 
+        // 1) 懒加载属性 → 真实地址（详情页 jQuery.lazyload 走 data-original）
         for (var a = 0; a < LAZY_SRC_ATTRS.length; a++) {
             var lazySrc = img.getAttribute(LAZY_SRC_ATTRS[a]);
-            if (lazySrc) {
-                saveOriginalSrc(img, lazySrc);
-                // 同一地址只赋值一次（2.0 用绝对URL与相对路径比较恒不等，会重复赋值）
-                if (img._assignedSrc !== lazySrc) { img._assignedSrc = lazySrc; img.src = lazySrc; }
-                processed = true;
-                break;
-            }
+            if (lazySrc) { plan = { kind: 'src', value: lazySrc }; break; }
         }
-        if (!processed) {
+        // 2) 懒加载 srcset → 只取第一个候选做请求与失败重试地址
+        if (!plan) {
             for (var i = 0; i < LAZY_SRCSET_ATTRS.length; i++) {
                 var ss = img.getAttribute(LAZY_SRCSET_ATTRS[i]);
                 if (ss) {
-                    if (img._assignedSrcset !== ss) { img._assignedSrcset = ss; img.srcset = ss; }
-                    // 只取第一个候选URL作为失败重试地址（2.0 把整串srcset存入_origSrc，重试必败）
-                    saveOriginalSrc(img, ss.split(',')[0].trim().split(/\s+/)[0]);
-                    processed = true;
+                    plan = { kind: 'srcset', value: ss, first: ss.split(',')[0].trim().split(/\s+/)[0] };
                     break;
                 }
             }
         }
+        // 3) 只有原生 loading=lazy、没有懒加载属性：地址已在 src，交给调度器做视口优先
+        if (!plan && img.getAttribute('loading') === 'lazy') { plan = { kind: 'sched' }; needsScheduling = true; }
+        // 4) 地址已经是可直接请求的绝对/根路径，只是需要抢在懒加载器前面
+        if (!plan && (src.indexOf('http') === 0 || src.indexOf('//') === 0 || src.indexOf('/') === 0)) plan = { kind: 'keep' };
 
-        if (!processed && img.getAttribute('loading') === 'lazy') {
+        // 不认识的图片（空 src、data: 内联图、images/xxx.gif 这类相对路径装饰图）一律不碰。
+        // v2.5 起把 referrerPolicy/decoding 的赋值移到这一行之后：
+        // 老版本会顺带给这些"与本脚本无关"的图片改属性（实测列表页的 <img class="big_img"> 空元素、
+        // 若干图标都被无意义地改成 no-referrer）
+        if (!plan) return false;
+
+        // 只有在确实要处理时才动属性。
+        // referrerPolicy 必须在任何 src 赋值之前设置，与"直接打开图片链接"的请求语义对齐（不带 Referer），
+        // 规避图床防盗链导致的"页内灰底、直开秒出"；decoding=async 避免解码阻塞渲染
+        img.referrerPolicy = 'no-referrer';
+        img.decoding = 'async';
+
+        if (plan.kind === 'src') {
+            saveOriginalSrc(img, plan.value);
+            // 同一地址只赋值一次（2.0 用绝对URL与相对路径比较恒不等，会重复赋值）
+            if (img._assignedSrc !== plan.value) { img._assignedSrc = plan.value; img.src = plan.value; }
+        } else if (plan.kind === 'srcset') {
+            if (img._assignedSrcset !== plan.value) { img._assignedSrcset = plan.value; img.srcset = plan.value; }
+            // 只取第一个候选URL作为失败重试地址（2.0 把整串 srcset 存入 _origSrc，重试必败）
+            saveOriginalSrc(img, plan.first);
+        } else if (plan.kind === 'sched') {
             saveOriginalSrc(img, img.currentSrc || src);
-            processed = true;
-            img._needsScheduling = true; // 视口优先：交给调度器决定立即或延迟激活
-        }
-
-        if (!processed && (src.indexOf('http') === 0 || src.indexOf('//') === 0 || src.indexOf('/') === 0)) {
+            img._needsScheduling = true;
+        } else { // keep
             saveOriginalSrc(img, src);
-            processed = true;
         }
 
-        if (processed) {
-            img._forceLoaded = true;
-            watchError(img);
-            if (img._needsScheduling) scheduleActivation(img);
-            // 已直接赋 src 的图片同步移除原生 loading=lazy，
-            // 否则浏览器仍会推迟实际抓取（data-src 路径 + loading=lazy 共存时）
-            else activateImage(img);
+        img._forceLoaded = true;
+        watchError(img);
+
+        if (needsScheduling) {
+            scheduleActivation(img);
+        } else {
+            // 地址已经就位，直接激活；处在首屏范围内的标 high，让两个慢图床先服务首屏
+            activateImage(img, nearViewport(img, VIEWPORT_MARGIN) ? 'high' : null);
         }
-        return processed;
+        return true;
     }
 
     function processImages(root) {
@@ -198,32 +280,39 @@
         for (var i = 0; i < imgs.length; i++) forceLoadImage(imgs[i]);
     }
 
-    function matchesAny(el, selectors) {
+    // 单次 matches 判断（原实现是 8 次 el.matches 循环；这些选择器都是 class 选择器，
+    // 合并成一个选择器列表语义等价、开销更低）
+    function matchesAny(el) {
         if (!el || el.nodeType !== 1 || typeof el.matches !== 'function') return false;
-        for (var s = 0; s < selectors.length; s++) {
-            if (el.matches(selectors[s])) return true;
-        }
-        return false;
+        return el.matches(COMBINED_SELECTOR);
     }
 
     // 合并 2.0 的 removeAds / removeAdElements：同一逻辑遍历一份选择器表
+    // ⚠️ 入参既可以是最外层的 document（nodeType 9，DOMContentLoaded 全量扫描与兜底轮询都传它），
+    //    也可以是 MutationObserver 送来的元素节点（nodeType 1），早期版本只允许 nodeType 1
+    //    会把 document 直接挡掉，导致全量扫描静默失效（广告清不干净）——务必保留 9 / 11 分支
     function removeMatching(root, selectors) {
         if (!root) return 0;
-        var removed = 0;
-        if (root !== document.body && root !== document.documentElement && matchesAny(root, selectors)) {
-            root.remove();
-            return 1;
+        if (root.nodeType === 1) {
+            var isRootEl = (root === document.body || root === document.documentElement);
+            // 自己就是广告容器就整块删掉
+            if (!isRootEl && matchesAny(root)) { root.remove(); return 1; }
+            // 叶子节点不可能包含广告后代，直接早退（解析期绝大多数新增节点是叶子，
+            // 老版本会对每个叶子都跑 8 次 querySelectorAll）
+            if (!isRootEl && !root.firstElementChild) return 0;
+        } else if (root.nodeType !== 9 && root.nodeType !== 11) {
+            return 0; // 文本 / 注释等，无需处理
         }
         if (!root.querySelectorAll) return 0;
-        for (var s = 0; s < selectors.length; s++) {
-            var els = root.querySelectorAll(selectors[s]);
-            for (var i = 0; i < els.length; i++) { els[i].remove(); removed++; }
-        }
-        return removed;
+        var els = root.querySelectorAll(COMBINED_SELECTOR);
+        for (var i = 0; i < els.length; i++) els[i].remove();
+        return els.length;
     }
 
     function processAll(root) {
-        processImages(root);
+        // 同上：document(9) / DocumentFragment(11) 都要放行
+        if (!root || (root.nodeType !== 1 && root.nodeType !== 9 && root.nodeType !== 11)) return;
+        if (root.firstElementChild) processImages(root);
         removeMatching(root, COMBINED_SELECTORS);
     }
 

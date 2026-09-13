@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         sis001列表缩略图
+// @name         sis001缩略图
 // @namespace    https://sis001.com/
 // @version      1.2
 // @description  在 sis001.com 全站列表页中从详情页抓取缩略图直接显示

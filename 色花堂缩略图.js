@@ -1,16 +1,23 @@
 // ==UserScript==
 // @name         色花堂缩略图
 // @namespace    http://98tang.com/
-// @version      2.2
+// @version      2.3
 // @description  PC版列表页加载移动版缩略图、宽屏布局、清理无用元素；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新并宽屏。
 //   v1.7：彻底移除全部懒加载（含原生 loading=lazy，后台标签页/无布局时也能立即请求）；decoding 统一为 async 不阻塞渲染；缩略图域名 preconnect 预连接提速；移动版请求失败自动重试且只缓存成功结果；列表/搜索/详情三页懒加载清除逻辑合并精简约300行。
 //   v1.8：详情图请求增加反爬拦截页检测与退避重试，被拦截的帖子不再被永久标记、后续可重试。
 //   v1.9：lazyload 构造函数拦截改为普通函数（new 不再抛 TypeError）；列表页自动加载仅在请求有效时推进页码、无效/被拦批次回滚标记自动重试；移动版空响应区分拦截页与 UA 未生效并告警；详情图统一仅接受 http(s)；搜索页 tid 数字校验；缩略图缓存键加入 fid。
 //   v1.10：修复自动加载失败重试定时器不触发（debounceTimer 触发后未清空，回滚批次只能靠下次滚动被动补跑）；放弃批次时恢复已处理标记，避免被 observer 重新入队重复请求。
-//   v2.2（2026-09-13 实测优化）：① @run-at 提前到 document-start，移动版请求与页面自身加载并行发出；
-//         ② 仅在页面确实存在帖子表格时才处理，18+ 年龄门等中间页不再空发三次请求；
-//         ③ 首屏前 6 行缩略图立即请求并标注 high 优先级，其余延迟加载 + 3.5s 兜底全量放行；
-//         ④ 预连接提前到移动版请求返回即执行；整组图加载失败时移除空缩略图容器。
+//   v2.2：@run-at 提前到 document-start；仅在有帖子表格时处理；首屏前 6 行立即请求并标注 high 优先级，其余延迟加载 + 3.5s 兜底全量放行；预连接提前；整组图失败时移除空容器。
+//   v2.3（2026-09-13 实测重写，见文件内各段实测数据）：
+//     ① 首屏判定由硬编码「前 6 行」改为按 getBoundingClientRect() 真实几何计算——实测行高恒为
+//        410px、一屏只有 1.7 行，旧值等于多抢 3 倍图片，且固定行数在任何分辨率下都不准；
+//     ② 取消「注入后 3.5s 无条件放行全部非首屏图」——实测该定时器在 +3.99s 一次性涌出 48 张
+//        /约 6.4MB，而对照实验证明它对首屏耗时毫无帮助（246ms vs 241ms）；改为原生 lazy 按需加载
+//        + 仅前台可见页生效的长时兜底，不看内容就离开时最多省下 6MB/48 个请求；
+//     ③ 页面级 CSS / 样式注入 / 三页通用懒加载清除各自收敛为一处，删掉冗余的 watchNv、无用
+//        变量与死 CSS；MutationObserver 去掉 class 监听（每张缩略图加载完都会改 class，纯噪音）；
+//     ④ 修正 v2.2 注释中"追加查询串会被图床挂起"的错误结论（实测正常返回），并补齐图床真实
+//        机制（Cloudflare + Backblaze B2，无服务端缩放；浏览器自动协商 WebP）。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
 // @connect      bhagq.4yl7j.com
@@ -40,7 +47,10 @@
   // 详情页单帖最大加载图片数
   const MAX_DETAIL_IMGS = 5;
 
-  // 列表页每个帖子最多展示多少张缩略图（移动版卡片实测含 1~3 张）
+  // 列表页每个帖子最多展示多少张缩略图
+  // 实测触屏模板每个卡片给 2~3 张（30 帖 ≈ 60~61 张图）。注意这是带宽大户：
+  // 单页 60 张实测合计 8.0MB（均值 136KB/张），改成 1 可省掉约一半流量，
+  // 但会改变版式，故默认保持跟随移动版给出的张数（上限 5 只是防御性封顶）。
   const MAX_THUMBS_PER_POST = 5;
 
   // 移动版请求失败后的重试次数与退避间隔
@@ -56,47 +66,78 @@
   // 所有可能的懒加载属性（按优先级排序）
   const LAZY_ATTRS = ['file', 'zoomfile', 'data-original', 'data-src', 'data-loadsrc', 'data-thumb', 'data-lazy-src', 'original', 'data-url'];
 
-  // ---- 首屏优先级 / 延迟加载（v2.2 新增）----
-  // 实测（1440x709 视口，forum-103-1 列表页）：注入缩略图后单行高 344~501px，首屏只能看到 1~2 行；
-  // 但一页 30 帖会产生 61 张「原图」（1916x1092 / 800x538，展示尺寸只有 456x304）。
-  // 61 张同时发起时会和首屏那几张抢连接与带宽，冷缓存下首屏明显更慢。
-  // 因此：前 EAGER_ROWS 行的缩略图立即请求（high 优先级），其余先占位、延迟加载。
+  // ============ 首屏判定 / 非首屏加载策略（v2.3 重写） ============
   //
-  // ⚠️ 为什么还要兜底定时器：原生 loading=lazy 在「后台标签页 / 元素无布局尺寸」时不会发起请求，
-  //    这正是 v1.7 当初彻底移除懒加载的原因。DEFER_FALLBACK_MS 到点后统一转 eager，
-  //    把「最终一定会加载」这个保证补回来，因此不会出现永远停在扫描光效上的占位图。
-  const EAGER_ROWS = 6;
-  const DEFER_FALLBACK_MS = 3500;
+  // 【为什么不再用固定行数】实测 1440x708 视口、容器宽 1440px 时，注入缩略图后每个帖子行高
+  // 恒为 410px → 一屏只能完整看到 1.7 行。而 v2.2 写死 EAGER_ROWS=6，等于把 6 行 = 12 张图
+  // （约 1.6MB）按高优先级抢先请求，比真实首屏所需的 4~6 张多出一倍以上。
+  // 更要紧的是行高随窗口宽度成比例变化（缩略图按百分比宽），固定行数在任何分辨率下都不准。
+  //
+  // 【新判据】逐行按 getBoundingClientRect().top 判断。注入是按 DOM 顺序逐行进行的，处理到第 k 行时
+  // 上面 k-1 行都已插入缩略图且高度已定型（CSS 给了 aspect-ratio，无需等图加载就有正确盒高），
+  // 因此第 k 行的 top 是准确的，判断天然适配任意窗口尺寸与任意滚动位置。
+  const FOLD_SLACK_PX = 120;   // 首屏下方留一点余量，半露出的行也按首屏处理
 
-  let deferFallbackTimer = null;
-
-  // 兜底放行：把所有仍在延迟状态的缩略图转为 eager（改 loading 即触发请求）
-  function scheduleDeferFallback() {
-    if (deferFallbackTimer) return;            // 已排期则不重复排（避免持续新增导致永不触发）
-    deferFallbackTimer = setTimeout(() => {
-      deferFallbackTimer = null;               // 清空引用，后续新增的延迟图可再次排期
-      const imgs = document.querySelectorAll('.sehua-thumb img[loading="lazy"]');
-      if (imgs.length === 0) return;
-      console.log(`[色花堂缩略图] 延迟兜底：放行 ${imgs.length} 张非首屏缩略图`);
-      imgs.forEach(img => { img.loading = 'eager'; });
-    }, DEFER_FALLBACK_MS);
+  function isAboveFold(tb) {
+    return tb.getBoundingClientRect().top < window.innerHeight + FOLD_SLACK_PX;
   }
+
+  // 【为什么非首屏不再"到点全量放行"】v2.2 在注入后 3.5s 无条件把全部非首屏图改成 eager。
+  // 实测（冷缓存、1440x708）：48 张 / 约 6.4MB 会在 +3.99s 一次性涌出，而用户此时多半还没滚到那里。
+  // 关键对照实验（同一批真实 URL，带缓存破坏串强制走网络，60 张共 8.0MB）：
+  //   · 只请求首屏 12 张          → 中位完成 246ms
+  //   · 60 张全部同时请求         → 首屏那 12 张中位完成 241ms，全部 60 张 1.7s 完成
+  // 即"非首屏抢带宽拖慢首屏"在本站并不成立（浏览器本来就按视口/优先级排队），
+  // 3.5s 全量放行既没有首屏收益，又凭空替用户预下载了 6MB。故改为按需加载。
+  //
+  // 【但仍保留兜底】原生 loading=lazy 在「后台/隐藏标签页」「元素无布局尺寸」时不会发起请求
+  // （实测 Agent Window 里 document.hidden === true 时确实一张都不请求，这也是 v1.7 当年彻底
+  // 删掉懒加载的原因）。折中方案：
+  //   · 隐藏页一律不主动放行——用户不在看的时候替他下载整页图片才是真的浪费；
+  //     页面重新可见后交给原生 lazy 处理（浏览器会立刻加载视口附近的图）。
+  //   · 前台可见页用长时定时器兜底，防御浏览器懒加载启发式漏掉个别图而永久停在占位态。
+  const LAZY_SAFETY_MS = 15000;
+  let lazySafetyTimer = null;
+
+  // 兜底放行：只在页面可见时执行
+  function releaseStaleLazy() {
+    lazySafetyTimer = null;
+    if (document.visibilityState !== 'visible') return;   // 隐藏页交还给原生 lazy
+    const imgs = document.querySelectorAll('.sehua-thumb img[loading="lazy"]');
+    if (imgs.length === 0) return;
+    console.log(`[色花堂缩略图] 兜底放行 ${imgs.length} 张原生懒加载未取走的缩略图`);
+    imgs.forEach(img => { img.loading = 'eager'; });
+  }
+
+  // 排期兜底（已排则不重复排，避免持续新增导致永不触发）
+  function scheduleLazySafety() {
+    if (lazySafetyTimer) return;
+    lazySafetyTimer = setTimeout(releaseStaleLazy, LAZY_SAFETY_MS);
+  }
+
+  // 页面重新可见时补排一次兜底（隐藏期间被跳过的批次靠这里接上）
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') scheduleLazySafety();
+  });
 
   // ============================ 工具函数 ============================
 
+  // 站内占位图标 / 用户头像 / base64 占位图的特征串，用于把装饰图排除在缩略图之外
+  const PLACEHOLDER_MARKERS = ['static/image', 'uc_server', 'none.gif'];
+
+  function isPlaceholder(url) {
+    if (url.indexOf('data:') === 0) return true;
+    return PLACEHOLDER_MARKERS.some(marker => url.indexOf(marker) !== -1);
+  }
+
   // 获取图片真实URL（从各种懒加载属性中提取）
-  // 排除站内占位图标（static/image）与用户头像（uc_server），避免把装饰图当缩略图
   function getRealSrc(img) {
     for (const attr of LAZY_ATTRS) {
       const val = img.getAttribute(attr);
-      if (val && val.indexOf('static/image') === -1 && val.indexOf('uc_server') === -1 && val !== 'none.gif') {
-        return val;
-      }
+      if (val && !isPlaceholder(val)) return val;
     }
     const src = img.getAttribute('src') || img.currentSrc;
-    if (src && src.indexOf('static/image') === -1 && src.indexOf('uc_server') === -1 && src.indexOf('none.gif') === -1 && src.startsWith('http')) {
-      return src;
-    }
+    if (src && src.startsWith('http') && !isPlaceholder(src)) return src;
     return null;
   }
 
@@ -138,7 +179,7 @@
     }
   }
 
-  // ============ 移动版缩略图获取原理（2026-09-04 抓包实测验证） ============
+  // ============ 移动版缩略图获取原理（2026-09-04 抓包 + 2026-09-13 复测） ============
   // 1. 核心机制：本站是 Discuz! X3.4 + n5 触屏模板，服务端只看请求头 User-Agent 分发模板。
   //    带 Android 移动 UA 请求 forum-{fid}-{page}.html，服务端直接返回触屏模板 HTML，
   //    其中每个帖子卡片是 <div class="n5_htmk">，缩略图真实地址在 <img data-original="https://tu.xxx/....jpg">。
@@ -156,7 +197,7 @@
   //    下面 headers 里显式写的 Cookie: mobile=2 会被 TM「合并」到浏览器 Cookie 之后
   //    （TM 官方文档 cookie 条目 / 5.6.6239 更新日志 "merge given cookies"，不会覆盖丢失 _safe）。
   //    若日志频繁出现"疑似被反爬拦截"多为请求过快被限流，内建重试会兜底。
-  //    ⚠️ v2.2 把本请求提前到 document-start：首次访问时 _safe 由主文档响应头写入，
+  //    ⚠️ v2.2 起本请求提前到 document-start：首次访问时 _safe 由主文档响应头写入，
   //       文档开始执行时该 Cookie 已落库，因此提前发送是安全的；万一仍被拦，DOM 就绪后的
   //       带重试流程会补一次（见 listPageMain）。
   //
@@ -164,6 +205,7 @@
   //    （DOMParser 会把相对 href 解析成绝对地址，tid=(\d+) 正则照常命中）；
   //    缩略图地址由 getRealSrc 按 LAZY_ATTRS 依次探测（触屏模板用 data-original）；
   //    用户头像(/uc_server/...)与站内占位图标已被 getRealSrc 的 uc_server / static/image 过滤排除。
+  //    实测命中率：forum-37 第 1/2/3/5 页均为「30 个帖子全部拿到映射，0 个需要回详情页兜底」。
   //
   // 5. mobile=2 双保险：URL 参数 + Cookie 都写 mobile=2，强制 Discuz 走触屏版（=2）
   //    而非标准手机版（=1，纯文字无图）。实测仅移动 UA 不带参数时服务端也会返回触屏模板，
@@ -172,8 +214,20 @@
   // 6. 已知边界：置顶帖在移动版顶部是纯文字列表（无缩略图），因此 PC 列表的置顶行不会注入缩略图，
   //    属预期行为（与移动版展示一致），非 bug。
   //
-  // 7. 缩略图 CDN 只有原图（2026-09-13 实测）：tu.djhdhs.us 上不存在 .thumb.jpg / /thumb/ 等小图变体，
-  //    且任何追加查询串的 URL 都会挂起不响应，所以无法靠换 URL 拿小图，只能靠「首屏优先 + 延迟加载」省带宽。
+  // 7. 缩略图图床实测（2026-09-13 修正 v2.2 的错误结论）：
+  //    · 图片只有原图，没有小图变体。响应头显示前端是 Cloudflare（CF-Cache-Status: HIT）、
+  //      回源 X-Canonical-Cache-Host: b2img.etboo.cc（Backblaze B2）。B2 是纯对象存储，
+  //      不提供图片处理，因此 ?w= / ?imageView2/ / ?x-oss-process= / ?imageMogr2/ 这类缩放参数
+  //      全部被忽略（实测 7 种写法 Content-Length 一律 174530，与不带参数完全一致）。
+  //      → 缩略图只能整张下载，省流量只能靠"少请求 / 按需请求"。
+  //    · 「追加查询串会被挂起」是错的：实测带 ?bsk=xxx 的 URL 70~72ms 正常返回同一张图，
+  //      可重复验证。v2.2 的这条注释已删除，避免误导后续优化。
+  //    · 图床要求 Referer 必须是本站（无 Referer 直接 403；带站点 Referer 200），
+  //      所以缩略图 <img> 绝不能设 referrerPolicy="no-referrer"。
+  //    · 浏览器会自动协商 WebP（Vary: accept；带 image/webp 的 Accept 头返回 image/webp），
+  //      无需脚本干预，实际下载量比 curl 测得的 JPEG 体积更小。
+  //    · Cache-Control: max-age=2592000（30 天），因此"冷缓存"只影响某个帖子第一次被看到；
+  //      同一帖子第二次出现必然命中缓存。
   function fetchMobileThumbs(fid, page) {
     return new Promise((resolve) => {
       const sp = new URLSearchParams(location.search);
@@ -266,38 +320,45 @@
     #nv { width: 100% !important; left: 0 !important; right: 0 !important; }
   `;
 
+  // 页面级布局修正（v2.3：原先在列表/搜索/繁忙/详情/首页 5 处重复内联，现收敛为一处）
+  const PAGE_CSS = `
+    ${WIDE_CSS}
+    #ct { width: auto !important; margin: 0 !important; padding: 0 10px !important; box-sizing: border-box !important; }
+    body { overflow-x: hidden !important; }
+  `;
+
   // 缩略图相关 CSS
   const THUMB_CSS = `
     .sehua-thumb { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 8px; }
-    .sehua-thumb > a, .sehua-thumb > img { display: flex; align-items: center; justify-content: center; text-decoration: none; overflow: hidden; transition: width 0.2s ease; }
-    .sehua-thumb img { height: auto !important; aspect-ratio: 3/2; object-fit: cover; border-radius: 4px; border: 1px solid #ddd; background: #f5f5f5; box-sizing: border-box !important; width: 100% !important; }
-    .sehua-thumb img:hover { border-color: #4a90d9; transform: scale(1.03); transition: all 0.2s; }
     .sehua-thumb { --img-width: calc((100% - 32px) / 5); }
-    .sehua-thumb > a, .sehua-thumb > img { width: var(--img-width) !important; }
+    .sehua-thumb > a, .sehua-thumb > img { display: flex; align-items: center; justify-content: center; text-decoration: none; overflow: hidden; width: var(--img-width) !important; transition: width 0.2s ease; }
+    .sehua-thumb img { height: auto !important; aspect-ratio: 3/2; object-fit: cover; border-radius: 4px; border: 1px solid #ddd; background: #f5f5f5; box-sizing: border-box !important; width: 100% !important; transition: border-color 0.2s ease, transform 0.2s ease; }
+    .sehua-thumb img:hover { border-color: #4a90d9; transform: scale(1.03); }
     .sehua-thumb.n1 { --img-width: 50%; }
     .sehua-thumb.n2 { --img-width: 40%; }
     .sehua-thumb.n3 { --img-width: calc((100% - 16px) / 3); }
     .sehua-thumb.n4 { --img-width: calc((100% - 24px) / 4); }
-    .sehua-thumb.n5 { --img-width: calc((100% - 32px) / 5); }
     .sehua-thumb > a.portrait, .sehua-thumb > img.portrait { width: calc(var(--img-width) * 0.7) !important; }
     .sehua-thumb > a.portrait img, .sehua-thumb > img.portrait { aspect-ratio: 2/3; }
-    .sehua-thumb img.sehua-error { display: none; }
     .sehua-thumb img.sehua-loading { background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%); background-size: 200% 100%; animation: sehua-shimmer 1.5s infinite; }
     @keyframes sehua-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
   `;
 
+  // 统一注入 <style>（v2.3：原先 6 处各自 createElement('style')，收敛为一处）
+  function addStyle(css) {
+    const style = document.createElement('style');
+    style.textContent = css;
+    document.head.appendChild(style);
+  }
+
   // 注入列表页 CSS
   function injectStyles() {
-    const style = document.createElement('style');
-    style.textContent = `
-      ${WIDE_CSS}
+    addStyle(`
+      ${PAGE_CSS}
       #threadlisttableid { table-layout: fixed !important; width: 100% !important; }
       #threadlisttableid th { width: 100% !important; padding-right: 0 !important; }
-      #ct { width: auto !important; margin: 0 !important; padding: 0 10px !important; box-sizing: border-box !important; }
-      body { overflow-x: hidden !important; }
       ${THUMB_CSS}
-    `;
-    document.head.appendChild(style);
+    `);
   }
 
   // 删除无用元素
@@ -309,9 +370,9 @@
 
   // 强制单图立即加载：设真实 src、清除所有懒加载痕迹
   function forceEagerImg(img) {
-    // 本站自绘的缩略图有自己的加载调度（见 createThumbWrap / scheduleDeferFallback），
-    // 必须排除，否则 MutationObserver 会把刚插入的延迟加载图立刻改成 eager，
-    // 首屏优先级策略当场失效
+    // 本站自绘的缩略图有自己的加载调度（见 createThumbWrap / scheduleLazySafety），
+    // 必须排除，否则 MutationObserver 会把刚插入的非首屏图立刻改成 eager，
+    // 按需加载策略当场失效
     if (img.closest && img.closest('.sehua-thumb')) return;
 
     const realSrc = getRealSrc(img);
@@ -358,11 +419,13 @@
         }
       });
     });
+    // v2.3：attributeFilter 去掉 'class'。每张缩略图加载完都会 classList.remove('sehua-loading')，
+    // 分页/筛选也会成片改 class，而 forceEagerImg 只依赖 src / 懒加载属性，监听 class 纯属噪音。
     observer.observe(mainContainer(), {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['file', 'zoomfile', 'data-original', 'data-src', 'data-loadsrc', 'src', 'lazy', 'loadsrc', 'class']
+      attributeFilter: ['file', 'zoomfile', 'data-original', 'data-src', 'data-loadsrc', 'src', 'lazy', 'loadsrc']
     });
   }
 
@@ -413,13 +476,20 @@
     window.IntersectionObserver.prototype = OriginalIO.prototype;
   }
 
+  // 三页通用的懒加载清理：立即清一遍 + 监听新增 + 覆盖构造函数
+  function scrubPageLazyLoad() {
+    forceEagerAll();
+    watchImages();
+    interceptLazyLoad();
+  }
+
   // ============ 缩略图注入 ============
 
   // 创建缩略图容器
-  //   urls     该帖的图片地址（调用方已截断到 MAX_THUMBS_PER_POST）
-  //   tid      帖子 ID，非空时每张图包一层 <a target=_blank> 指向详情页
-  //   deferred true = 非首屏，先占位、延迟请求（由 scheduleDeferFallback 兜底放行）
-  function createThumbWrap(urls, tid, deferred) {
+  //   urls  该帖的图片地址（调用方已截断到 MAX_THUMBS_PER_POST）
+  //   tid   帖子 ID，非空时每张图包一层 <a target=_blank> 指向详情页
+  //   eager true = 首屏（立即请求 + high 优先级）；false = 非首屏（原生懒加载，按需请求）
+  function createThumbWrap(urls, tid, eager) {
     const wrap = document.createElement('div');
     const n = Math.min(Math.max(urls.length, 1), 5);
     wrap.className = 'sehua-thumb n' + n;
@@ -441,14 +511,10 @@
       const onload = () => {
         img.classList.remove('sehua-loading');
         // 竖图（高>宽）单独缩小并改用 2/3 比例，避免被 3/2 的裁剪框切掉主体
-        if (img.naturalHeight && img.naturalWidth && img.naturalHeight > img.naturalWidth) {
-          container.classList.add('portrait');
-        }
+        if (img.naturalHeight > img.naturalWidth) container.classList.add('portrait');
       };
 
       const onerror = () => {
-        img.classList.remove('sehua-loading');
-        img.classList.add('sehua-error');
         container.remove();
         // 整组全失败时连容器一起移除，避免在标题下留一段空白的 margin 间隙
         if (!wrap.querySelector('img')) wrap.remove();
@@ -457,15 +523,8 @@
       img.addEventListener('load', onload, { once: true });
       img.addEventListener('error', onerror, { once: true });
 
-      if (deferred) {
-        // 非首屏：只占位不请求；loading=lazy 由浏览器在接近视口时才拉取，
-        // 再由 scheduleDeferFallback 的定时器兜底放行（后台标签页也能加载完）
-        img.loading = 'lazy';
-        img.fetchPriority = 'low';
-        img.src = url;
-        scheduleDeferFallback();
-      } else {
-        // 首屏：不设 loading=lazy → 立即发起请求；high 让首屏图优先于页面其余图片与延迟图
+      if (eager) {
+        // 首屏：立即发起请求；high 让首屏图优先于页面其余图片
         img.loading = 'eager';
         img.fetchPriority = 'high';
         img.src = url;
@@ -475,34 +534,37 @@
         if (img.complete) {
           img.naturalWidth > 0 ? onload() : onerror();
         }
+      } else {
+        // 非首屏：交给浏览器原生懒加载（会提前约一屏开始加载），不再设 src 就抢带宽。
+        // 隐藏标签页下浏览器不会请求，此时由 releaseStaleLazy 在页面可见后兜底。
+        img.loading = 'lazy';
+        img.fetchPriority = 'low';
+        img.src = url;
+        scheduleLazySafety();
       }
     });
 
     return wrap;
   }
 
-  // 注入缩略图
-  //   defer 该行是否属于「非首屏」——由调用方按行序判断（见 isAboveFoldRow / processTable）
-  function injectThumb(tr, thumbMap, defer) {
+  // 注入缩略图；是否按首屏处理由行所在 tbody 的真实几何位置决定
+  function injectThumb(tr, thumbMap) {
     if (!thumbMap) return;
     const th = tr.querySelector('th');
     const tbody = tr.closest('tbody');
     const tid = tbody?.id?.match(/\d+/)?.[0];
     if (tid && thumbMap[tid] && th && !th.querySelector('.sehua-thumb')) {
-      th.appendChild(createThumbWrap(thumbMap[tid].slice(0, MAX_THUMBS_PER_POST), tid, defer));
+      th.appendChild(createThumbWrap(
+        thumbMap[tid].slice(0, MAX_THUMBS_PER_POST),
+        tid,
+        tbody ? isAboveFold(tbody) : true
+      ));
     }
   }
 
-  // 判断某个帖子行是否位于首屏额度内（决定缩略图立即加载还是延迟加载）
-  function isAboveFoldRow(tb) {
-    const rows = document.querySelectorAll('#threadlisttableid tbody[id^=normalthread_]');
-    return Array.prototype.indexOf.call(rows, tb) < EAGER_ROWS;
-  }
-
   // 处理单个 tr
-  function processRow(tr, thumbMap, defer) {
+  function processRow(tr, thumbMap) {
     const th = tr.querySelector('th');
-    const tbody = tr.closest('tbody');
     const tps = th?.querySelector('.tps');
     const firstBy = tr.querySelector('td.by');
 
@@ -522,26 +584,28 @@
       }
     }
 
-    injectThumb(tr, thumbMap, defer);
+    injectThumb(tr, thumbMap);
     // 单列化：删掉除 th 之外的所有单元格，标题获得整行宽度
     tr.querySelectorAll('td').forEach(td => td.remove());
   }
 
   // 处理表格
   function processTable(thumbMap) {
-    let injected = 0, moved = 0, thumbRow = 0;
+    let injected = 0, moved = 0, eager = 0;
     document.querySelectorAll('#threadlisttableid tr').forEach(tr => {
       const th = tr.querySelector('th');
       const hadThumb = th?.querySelector('.sehua-thumb');
       const hadEm = th?.querySelector('.tps em');
 
-      // 只有真正注入了缩略图的行才消耗首屏额度，置顶帖（无图）不占额度
-      processRow(tr, thumbMap, thumbRow >= EAGER_ROWS);
+      processRow(tr, thumbMap);
 
-      if (!hadThumb && th?.querySelector('.sehua-thumb')) { injected++; thumbRow++; }
+      if (!hadThumb && th?.querySelector('.sehua-thumb')) {
+        injected++;
+        if (th.querySelector('.sehua-thumb img[fetchpriority="high"]')) eager++;
+      }
       if (!hadEm && th?.querySelector('.tps em')) moved++;
     });
-    console.log(`[色花堂缩略图] 注入 ${injected} 个缩略图（前 ${EAGER_ROWS} 行立即加载，其余延迟），移动 ${moved} 个日期`);
+    console.log(`[色花堂缩略图] 注入 ${injected} 个缩略图（${eager} 个在首屏内立即加载，其余交给原生按需加载），移动 ${moved} 个日期`);
   }
 
   // ============ 移动版缩略图缓存与预连接 ============
@@ -567,7 +631,8 @@
     return fetchPromise;
   }
 
-  // 对缩略图所在域名预建连接（DNS + TCP + TLS），缩短首图耗时
+  // 对缩略图所在域名预建连接（DNS + TCP + TLS），缩短首图耗时。
+  // 注意不要加 crossorigin：本站缩略图是普通 <img>（非 CORS 请求），加了反而会多建一条连接。
   function preconnectImageHosts(mapping) {
     if (!document.head) return;   // document-start 阶段 <head> 可能尚未建立
     const hosts = new Set();
@@ -638,8 +703,6 @@
   // 并发加载 fallback 缩略图（列表页上移动版没给出缩略图的帖子，逐个回详情页取）
   async function loadFallbackThumbs(fallbackBatch, concurrency = MAX_CONCURRENT) {
     const pool = new ConcurrencyPool(concurrency);
-    // 行序快照：用于判断这批帖子是否在首屏额度内（只算一次，避免每个任务重复查询 DOM）
-    const rows = Array.from(document.querySelectorAll('#threadlisttableid tbody[id^=normalthread_]'));
     const tasks = fallbackBatch.map(tb => pool.add(async () => {
       const th = tb.querySelector('th');
       const tid = tb.id?.match(/\d+/)?.[0];
@@ -651,13 +714,18 @@
         return;
       }
       if (urls.length > 0 && !th.querySelector('.sehua-thumb')) {
-        th.appendChild(createThumbWrap(urls, tid, !isAboveFoldRow(tb)));
+        th.appendChild(createThumbWrap(urls, tid, isAboveFold(tb)));
       }
     }));
     await Promise.all(tasks);
   }
 
   // ============ 列表页自动加载监听 ============
+  //
+  // ⚠️ 2026-09-13 未能实测复现：站点确实加载了 static/js/autoloadpage.js、#autopbn 也存在且可见
+  //    （rel="forum.php?mod=forumdisplay&fid=37&page=6"），但在 Agent Window 的后台标签页里
+  //    滚到底部不外乎 document.hidden === true，站点的滚动加载始终没触发，无法取样。
+  //    该分支按 Discuz 原版行为保留（校验、回滚、去重逻辑本身是自洽的），但属于"未经真实触发验证"。
 
   function watchAutoLoad(fid, initialPage) {
     const table = document.getElementById('threadlisttableid');
@@ -678,7 +746,7 @@
       // 先完成单列化与日期搬移（此时还没有缩略图映射，只做结构处理）
       batch.forEach(tb => {
         const tr = tb.querySelector('tr');
-        if (tr) processRow(tr, null, true);
+        if (tr) processRow(tr, null);
       });
       fetchMobileThumbsByPage(fid, targetPage).then(result => {
         if (!mobileResultOk(result)) {
@@ -707,9 +775,9 @@
         batch.forEach(tb => {
           delete tb.dataset.sehuaRetry;
           const tr = tb.querySelector('tr');
-          // 追加进来的帖子一定在当前视口下方（用户是滚到底部才触发的），一律走延迟加载；
-          // 若用户就停在附近，loading=lazy 会立刻拉取，不会出现空窗
-          if (tr) injectThumb(tr, result.mapping, true);
+          // 追加进来的帖子一定在当前视口下方（用户是滚到底部才触发的），
+          // injectThumb 内部的几何判断会自然把它们判为非首屏 → 走原生按需加载
+          if (tr) injectThumb(tr, result.mapping);
         });
         const fallbackBatch = batch.filter(tb => {
           const tid = tb.id?.match(/\d+/)?.[0];
@@ -751,17 +819,6 @@
     });
     observer.observe(table, { childList: true, subtree: true });
     console.log('[色花堂缩略图] 已监听自动加载，起始页 ' + initialPage);
-  }
-
-  // 监听 #nv
-  function watchNv() {
-    const nv = document.getElementById('nv');
-    if (!nv) return;
-    const observer = new MutationObserver(() => {
-      if (nv.style.width !== '100%') nv.style.width = '100%';
-      if (nv.style.left !== '0px') nv.style.left = '0px';
-    });
-    observer.observe(nv, { attributes: true, attributeFilter: ['style'] });
   }
 
   // ============ 搜索页逻辑 ============
@@ -857,7 +914,9 @@
           // 标记已处理，避免对无图帖子反复请求
           li.dataset.sehuaChecked = '1';
           if (urls.length > 0 && !li.querySelector('.sehua-thumb')) {
-            li.appendChild(createThumbWrap(urls, tid, false));
+            // 与列表页同一套判据：视口内的立即加载，视口外的交给原生懒加载，
+            // 避免搜索结果较多时一次性把几十个帖子的详情图全部拉下来
+            li.appendChild(createThumbWrap(urls, tid, isAboveFold(li)));
           }
         } catch (e) {
           loading.remove();
@@ -876,27 +935,18 @@
 
   // 搜索页主流程
   async function searchPageMain() {
-    const style = document.createElement('style');
-    style.textContent = `
-      ${WIDE_CSS}
+    addStyle(`
+      ${PAGE_CSS}
       ${THUMB_CSS}
       .sehua-loading { color: #999; font-size: 12px; text-align: center; padding: 8px; }
       .slst.mtw { width: 100% !important; }
-      #ct { width: auto !important; margin: 0 !important; padding: 0 10px !important; box-sizing: border-box !important; }
       /* 搜索页：强制所有图片立即显示 */
       #threadlist img { opacity: 1 !important; visibility: visible !important; transition: none !important; }
       #threadlist img.lazy, #threadlist img.lazyload { opacity: 1 !important; visibility: visible !important; }
-      body { overflow-x: hidden !important; }
-    `;
-    document.head.appendChild(style);
+    `);
 
     removeUnused();
-    watchNv();
-
-    // 移除所有懒加载并监听新增图片（v2.2 起与列表/详情页对齐，补上构造函数拦截）
-    forceEagerAll();
-    watchImages();
-    interceptLazyLoad();
+    scrubPageLazyLoad();
 
     const switchWrap = addForumSwitches();
     if (!switchWrap) {
@@ -941,13 +991,7 @@
     sessionStorage.setItem(retryKey, String(retryCount + 1));
     console.log(`[色花堂缩略图] 检测到"搜索繁忙"（第${retryCount + 1}次），4 秒后自动刷新`);
 
-    const style = document.createElement('style');
-    style.textContent = `
-      ${WIDE_CSS}
-      #ct { width: auto !important; margin: 0 !important; padding: 0 10px !important; box-sizing: border-box !important; }
-      body { overflow-x: hidden !important; }
-    `;
-    document.head.appendChild(style);
+    addStyle(PAGE_CSS);
 
     const tip = document.createElement('div');
     tip.style.cssText = 'position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(0,0,0,0.8); color:#fff; padding:16px 24px; border-radius:8px; font-size:14px; z-index:99999; text-align:center; box-shadow:0 4px 12px rgba(0,0,0,0.3);';
@@ -971,42 +1015,28 @@
 
   function detailPageMain() {
     console.log('[色花堂缩略图] 详情页模式');
-    const style = document.createElement('style');
-    style.textContent = `
-      ${WIDE_CSS}
-      #ct { width: auto !important; margin: 0 !important; padding: 0 10px !important; box-sizing: border-box !important; }
+    addStyle(`
+      ${PAGE_CSS}
       #postlist { width: 100% !important; }
       #postlist ignore_js_op img.zoom { display: block; margin-left: auto; margin-right: auto; }
       #postlist ignore_js_op { text-align: center; }
       #postlist img { opacity: 1 !important; visibility: visible !important; transition: none !important; }
       #postlist img.lazy, #postlist img.lazyload { opacity: 1 !important; visibility: visible !important; }
-      body { overflow-x: hidden !important; }
-    `;
-    document.head.appendChild(style);
+    `);
 
     removeUnused();
-
-    // 全量立即加载 + 监听新增图片 + 拦截论坛懒加载
-    forceEagerAll();
-    watchImages();
-    interceptLazyLoad();
-
-    watchNv();
+    scrubPageLazyLoad();
   }
 
   // ============ 首页主流程 ============
 
   function homePageMain() {
     console.log('[色花堂缩略图] 首页模式');
-    const style = document.createElement('style');
-    style.textContent = `
-      ${WIDE_CSS}
-      #ct { width: auto !important; margin: 0 !important; padding: 0 10px !important; box-sizing: border-box !important; }
-      body { overflow-x: hidden !important; }
-    `;
-    document.head.appendChild(style);
+    addStyle(PAGE_CSS);
     removeUnused();
-    watchNv();
+    // v2.3：与其余页面统一，首页同样清一遍懒加载（原先首页漏掉了这一步，
+    // 首页若有 loading=lazy 图会停在占位态）
+    scrubPageLazyLoad();
   }
 
   // ============ 列表页主流程 ============
@@ -1018,7 +1048,7 @@
       return;
     }
 
-    // v2.2：URL 是列表页但不代表正文就是帖子表格。
+    // URL 是列表页但不代表正文就是帖子表格。
     // 首次访问（还没有 _safe Cookie）时服务端返回「18+ 年龄门」中间页，URL 仍是 forum-103-1.html；
     // 此时既没有行可以注入，移动版请求也会被反爬挡下。直接退出，省掉 3 次请求 + 2×1.5s 退避。
     if (!document.getElementById('threadlisttableid')) {
@@ -1028,12 +1058,7 @@
 
     injectStyles();
     removeUnused();
-    watchNv();
-
-    // 立即移除列表页所有懒加载并监听新增图片
-    forceEagerAll();
-    watchImages();
-    interceptLazyLoad();
+    scrubPageLazyLoad();
 
     const pageNo = parseInt(page);
     watchAutoLoad(fid, pageNo);
