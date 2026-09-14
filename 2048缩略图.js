@@ -30,8 +30,10 @@
           这是有意的取舍：开着页面慢慢看时不必等图，代价是停留超过该时长就整页下载。
        4) 图床：域名不固定，同一页可能出现多个（单页常见 2~5 个域名、单域名可占几十张）。
           每个 origin 建一条 preconnect（DNS+TCP+TLS 提前握手），不加 crossorigin ——
-          这些是普通 <img> 非 CORS 请求。图片地址本来就在页面 src 里、preload scanner 见到即连接，
-          所以 preconnect 的增量收益主要在"窗口内尚未出现的域名"：滚动/兜底放行时省一次握手。
+          这些是普通 <img> 非 CORS 请求。https 页面里出现的 http 源不预连接：按混合内容规则它
+          最终不会走 http（浏览器会升级或拦掉），预连接只会白建一条连接。
+          图片地址本来就在页面 src 里、preload scanner 见到即连接，所以 preconnect 的增量收益
+          主要在"窗口内尚未出现的域名"：滚动/兜底放行时省一次握手。
        5) 图床只认"无 Referer"：缩略图统一 referrerPolicy="no-referrer"（语义对齐"直接打开图片
           链接"），规避防盗链导致的页内灰底；失败时穿透缓存有限次重试，仍失败则压暗标记、点一下可再试。
           图床支持 WebP 协商（浏览器自动处理，脚本不干预）且响应很慢，所以"少发请求"同时省流量与
@@ -142,6 +144,9 @@
         try {
             var u = new URL(url, location.href);
             if (u.host === location.host) return;
+            // https 页面里出现的 http 源不预连接：按混合内容规则它最终不会走 http（浏览器会升级或拦掉），
+            // 预连接它只会白建一条连接；同一图床的 https 版本若有需要，会在处理对应图片时单独被这里接住
+            if (u.protocol === 'http:' && location.protocol === 'https:') return;
             origin = u.origin;
         } catch (e) { return; }
         if (!origin || preconnectedHosts[origin]) return;
