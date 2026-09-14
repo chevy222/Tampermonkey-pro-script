@@ -1,47 +1,8 @@
 // ==UserScript==
 // @name         色花堂缩略图
 // @namespace    http://98tang.com/
-// @version      2.5
+// @version      2.6
 // @description  PC版列表页加载移动版缩略图、宽屏布局、清理无用元素；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新并宽屏；列表页按真实视口几何判定首屏优先加载，非首屏按需加载以节省带宽。
-//   v1.7：彻底移除全部懒加载（含原生 loading=lazy，后台标签页/无布局时也能立即请求）；decoding 统一为 async 不阻塞渲染；缩略图域名 preconnect 预连接提速；移动版请求失败自动重试且只缓存成功结果；列表/搜索/详情三页懒加载清除逻辑合并精简约300行。
-//   v1.8：详情图请求增加反爬拦截页检测与退避重试，被拦截的帖子不再被永久标记、后续可重试。
-//   v1.9：lazyload 构造函数拦截改为普通函数（new 不再抛 TypeError）；列表页自动加载仅在请求有效时推进页码、无效/被拦批次回滚标记自动重试；移动版空响应区分拦截页与 UA 未生效并告警；详情图统一仅接受 http(s)；搜索页 tid 数字校验；缩略图缓存键加入 fid。
-//   v1.10：修复自动加载失败重试定时器不触发（debounceTimer 触发后未清空，回滚批次只能靠下次滚动被动补跑）；放弃批次时恢复已处理标记，避免被 observer 重新入队重复请求。
-//   v2.2：@run-at 提前到 document-start；仅在有帖子表格时处理；首屏前 6 行立即请求并标注 high 优先级，其余延迟加载 + 3.5s 兜底全量放行；预连接提前；整组图失败时移除空容器。
-//   v2.3（2026-09-13 实测重写，见文件内各段实测数据）：
-//     ① 首屏判定由硬编码「前 6 行」改为按 getBoundingClientRect() 真实几何计算——实测行高恒为
-//        410px、一屏只有 1.7 行，旧值等于多抢 3 倍图片，且固定行数在任何分辨率下都不准；
-//     ② 取消「注入后 3.5s 无条件放行全部非首屏图」——实测该定时器在 +3.99s 一次性涌出 48 张
-//        /约 6.4MB，而对照实验证明它对首屏耗时毫无帮助（246ms vs 241ms）；改为原生 lazy 按需加载
-//        + 仅前台可见页生效的长时兜底，不看内容就离开时最多省下 6MB/48 个请求；
-//     ③ 页面级 CSS / 样式注入 / 三页通用懒加载清除各自收敛为一处，删掉冗余的 watchNv、无用
-//        变量与死 CSS；MutationObserver 去掉 class 监听（每张缩略图加载完都会改 class，纯噪音）；
-//     ④ 修正 v2.2 注释中"追加查询串会被图床挂起"的错误结论（实测正常返回），并补齐图床真实
-//        机制（Cloudflare + Backblaze B2，无服务端缩放；浏览器自动协商 WebP）。
-//   v2.4（2026-09-13 回归实测修复）：
-//     ① 修复 TM 沙箱隔离缺陷：带 @grant 时脚本内 window 是包装对象，纯赋值不透传到页面——
-//        interceptLazyLoad 对 LazyLoad / lazyload / IntersectionObserver 的覆盖自 v1.7 起
-//        从未真正生效（实测详情页页面上下文中 lazyload 仍是站点原库、IO 仍为 native），
-//        功能一直靠 forceEagerImg 的 DOM 级防线掩盖；现全部改经 unsafeWindow 写入真实页面；
-//     ② 首页不再挂常驻 MutationObserver（mainContainer 兜底到 body 等于监听整个文档，
-//        实测首页 64 图零懒加载、无动态新增场景，首轮 forceEagerAll 已全覆盖）；
-//     ③ 非首屏兜底放行 15s → 10s（实测转可见后 10s 内原生 lazy 已取完视口附近的图）。
-//   v2.4.1（2026-09-13 审计第一批剩余项）：
-//     ① 修复审计 #1：listPageMain 改为直接 await 抢跑的 earlyListFetch Promise——旧写法在抢跑
-//        失败时会真的再发一次不带重试的请求（失败结果不写缓存、pending 已删，无复用路径可命中），
-//        失败路径从 1+1+3 次请求降为 1+3 次；
-//     ② 修复审计 #2：createThumbWrap 的张数封顶由硬编码 5 改为 MAX_THUMBS_PER_POST 常量联动，
-//        并在常量注释中标注「CSS 只定义到 n5」的联动约束。
-//   v2.5（2026-09-13 审计第二批次清偿，#3/#4/#5/#7/#8/#11/#12/#15）：
-//     ① 搜索页与详情页逐字重复的"强制图片可见"CSS 收敛为 forceVisibleCSS()（#3）；
-//     ② fetchMobileThumbs 内联的 safeid 判定改用已有的 isSafePage()（#4）；
-//     ③ 'sehuaBusyRetry' 字面量提为 BUSY_RETRY_KEY 常量，函数内五处引用点全部统一（#5）；
-//        （v2.5 初版留下过 `const retryKey = BUSY_RETRY_KEY` 的局部别名，已删除）
-//     ④ watchImages 的 attributeFilter 改由 LAZY_ATTRS 派生，两份清单永不再脱钩（#7）；
-//     ⑤ 详情页重试参数提为 DETAIL_RETRY_TIMES / DETAIL_RETRY_BASE_MS 常量（#8）；
-//     ⑥ visibilitychange 监听改为首次排期兜底时才注册，详情/首页不再常驻空定时器（#11）；
-//     ⑦ @description 补 v2.3 起的核心行为变化"首屏几何判定 + 非首屏按需加载"（#12）；
-//     ⑧ eager/lazy 两分支的 img.complete 缓存兜底对称化（#15）。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
 // @connect      bhagq.4yl7j.com
@@ -85,7 +46,7 @@
   const MOBILE_RETRY_DELAY = 1500;
 
   // 详情页（fallback/搜索页取图）被拦截后的重试次数与退避基数
-  // 实际间隔 = 基数 + 第几次×基数：2s / 4s（与旧版硬编码行为一致）
+  // 实际间隔 = 基数 + 第几次×基数：2s / 4s
   const DETAIL_RETRY_TIMES = 3;
   const DETAIL_RETRY_BASE_MS = 2000;
 
@@ -95,44 +56,39 @@
   // 过滤开关状态的 localStorage 键名
   const FILTER_STORAGE_KEY = 'sehuaFilterState';
 
-  // 搜索繁忙重试计数的 sessionStorage 键名（v2.5 提为常量，原三处字面量 + 一处局部变量）
+  // 搜索繁忙重试计数的 sessionStorage 键名
   const BUSY_RETRY_KEY = 'sehuaBusyRetry';
 
   // 所有可能的懒加载属性（按优先级排序）
   const LAZY_ATTRS = ['file', 'zoomfile', 'data-original', 'data-src', 'data-loadsrc', 'data-thumb', 'data-lazy-src', 'original', 'data-url'];
 
-  // ============ 首屏判定 / 非首屏加载策略（v2.3 重写） ============
+  // ============ 首屏判定 / 非首屏加载策略 ============
   //
-  // 【为什么不再用固定行数】实测 1440x708 视口、容器宽 1440px 时，注入缩略图后每个帖子行高
-  // 恒为 410px → 一屏只能完整看到 1.7 行。而 v2.2 写死 EAGER_ROWS=6，等于把 6 行 = 12 张图
-  // （约 1.6MB）按高优先级抢先请求，比真实首屏所需的 4~6 张多出一倍以上。
-  // 更要紧的是行高随窗口宽度成比例变化（缩略图按百分比宽），固定行数在任何分辨率下都不准。
-  //
-  // 【新判据】逐行按 getBoundingClientRect().top 判断。注入是按 DOM 顺序逐行进行的，处理到第 k 行时
-  // 上面 k-1 行都已插入缩略图且高度已定型（CSS 给了 aspect-ratio，无需等图加载就有正确盒高），
-  // 因此第 k 行的 top 是准确的，判断天然适配任意窗口尺寸与任意滚动位置。
+  // 【判据】逐行按 getBoundingClientRect().top 判断，不用固定行数。注入按 DOM 顺序逐行进行，
+  // 处理到第 k 行时上面 k-1 行已插入缩略图且高度已定型（CSS 给了 aspect-ratio，无需等图加载即有
+  // 正确盒高），因此第 k 行的 top 是准确的，天然适配任意窗口尺寸与滚动位置。
+  // 固定行数在两处都不准：行高随窗口宽度成比例变化（缩略图按百分比宽），也随每帖图片张数变化。
+  // 实测（1440x708、每帖 2 张）：行高恒 409px，一屏只见 1.7 行，前 2 行共 4 张被判为首屏。
   const FOLD_SLACK_PX = 120;   // 首屏下方留一点余量，半露出的行也按首屏处理
 
   function isAboveFold(tb) {
     return tb.getBoundingClientRect().top < window.innerHeight + FOLD_SLACK_PX;
   }
 
-  // 【为什么非首屏不再"到点全量放行"】v2.2 在注入后 3.5s 无条件把全部非首屏图改成 eager。
-  // 实测（冷缓存、1440x708）：48 张 / 约 6.4MB 会在 +3.99s 一次性涌出，而用户此时多半还没滚到那里。
-  // 关键对照实验（同一批真实 URL，带缓存破坏串强制走网络，60 张共 8.0MB）：
-  //   · 只请求首屏 12 张          → 中位完成 246ms
-  //   · 60 张全部同时请求         → 首屏那 12 张中位完成 241ms，全部 60 张 1.7s 完成
-  // 即"非首屏抢带宽拖慢首屏"在本站并不成立（浏览器本来就按视口/优先级排队），
-  // 3.5s 全量放行既没有首屏收益，又凭空替用户预下载了 6MB。故改为按需加载。
+  // 【为什么非首屏不"到点全量放行"】旧策略（注入后 3.5s 无条件把全部非首屏图改 eager）实测会在
+  // +3.99s 一次性涌出 48 张 / 约 6.4MB，而对照实验证明它对首屏耗时毫无帮助（只请求首屏 12 张：
+  // 中位 246ms；60 张同时请求：首屏那 12 张中位 241ms）。即"非首屏抢带宽拖慢首屏"在本站并不成立
+  // （浏览器本来就按视口/优先级排队），全量放行只会凭空替用户预下载数 MB。故改为按需加载。
   //
-  // 【但仍保留兜底】原生 loading=lazy 在「后台/隐藏标签页」「元素无布局尺寸」时不会发起请求
-  // （实测 Agent Window 里 document.hidden === true 时确实一张都不请求，这也是 v1.7 当年彻底
-  // 删掉懒加载的原因）。折中方案：
+  // 【但仍保留兜底】原生 loading=lazy 在「后台/隐藏标签页」「元素无布局尺寸」时不会发起请求。
+  // 折中：
   //   · 隐藏页一律不主动放行——用户不在看的时候替他下载整页图片才是真的浪费；
   //     页面重新可见后交给原生 lazy 处理（浏览器会立刻加载视口附近的图）。
   //   · 前台可见页用长时定时器兜底，防御浏览器懒加载启发式漏掉个别图而永久停在占位态。
-  // v2.4：15000 → 10000。实测页面转可见后 10s 内浏览器原生 lazy 已把视口附近的图取完，
-  // 兜底只防启发式漏网的个别图；缩短可减少漏加载图停留 shimmer 的最坏时长
+  // ⚠️ 已知代价（有意保留，未加几何闸门）：本兜底只看"页面可见 + 还有 lazy 图"，不看位置，
+  // 因此前台不滚动地停留满 10s，剩余非首屏图会被一次性全部转 eager。实测：T+4.5s 时仅请求 8 张 /
+  // 共 62 张，T+13s 变成 62/62，日志为「兜底放行 56~58 张」，约合 7MB。若要更省流，
+  // 应给下面的选择器再加一层几何条件（仅放行视口下方 2 屏内）——这是刻意留的取舍点。
   const LAZY_SAFETY_MS = 10000;
   let lazySafetyTimer = null;
 
@@ -142,14 +98,13 @@
     if (document.visibilityState !== 'visible') return;   // 隐藏页交还给原生 lazy
     const imgs = document.querySelectorAll('.sehua-thumb img[loading="lazy"]');
     if (imgs.length === 0) return;
-    console.log(`[色花堂缩略图] 兜底放行 ${imgs.length} 张原生懒加载未取走的缩略图`);
+    log(`兜底放行 ${imgs.length} 张原生懒加载未取走的缩略图`);
     imgs.forEach(img => { img.loading = 'eager'; });
   }
 
   // 排期兜底（已排则不重复排，避免持续新增导致永不触发）
-  // v2.5（审计 #11）：visibilitychange 监听改为首次排期时才注册——原先在 IIFE 顶层
-  // 无条件注册，详情页/首页这类根本不会创建 lazy 缩略图的页面也常驻，每次切回前台
-  // 都白排一个 10s 定时器。懒注册后只有真正用上按需加载的页面（列表/搜索）才有此开销
+  // visibilitychange 监听改为首次排期时才注册：详情页/首页这类不会创建 lazy 缩略图的页面
+  // 不必常驻，否则每次切回前台都白排一个 10s 定时器
   let visibilityBound = false;
   function scheduleLazySafety() {
     if (lazySafetyTimer) return;
@@ -165,6 +120,10 @@
 
   // ============================ 工具函数 ============================
 
+  // 运行日志开关：DEBUG=false 时叙事型日志全部静默，只保留 error / warn
+  const DEBUG = false;
+  const log = (...args) => { if (DEBUG) console.log('[色花堂缩略图]', ...args); };
+
   // 站内占位图标 / 用户头像 / base64 占位图的特征串，用于把装饰图排除在缩略图之外
   const PLACEHOLDER_MARKERS = ['static/image', 'uc_server', 'none.gif'];
 
@@ -173,14 +132,27 @@
     return PLACEHOLDER_MARKERS.some(marker => url.indexOf(marker) !== -1);
   }
 
-  // 获取图片真实URL（从各种懒加载属性中提取）
+  // 归一化成 http(s) 绝对地址：协议相对（//host/a.jpg）与相对路径都还原。
+  // 只用 startsWith('http') 判会把这两类静默丢弃——表现是整页缩略图消失、日志却只报"未找到结构"，
+  // 排查方向会被完全带偏，故统一在这里收口。
+  function normalizeHttpUrl(val, base) {
+    if (!val) return null;
+    try {
+      const u = new URL(val, base || location.href);
+      return (u.protocol === 'http:' || u.protocol === 'https:') ? u.href : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // 获取图片真实URL（从各种懒加载属性中提取，统一归一化）
   function getRealSrc(img) {
     for (const attr of LAZY_ATTRS) {
-      const val = img.getAttribute(attr);
-      if (val && !isPlaceholder(val)) return val;
+      const url = normalizeHttpUrl(img.getAttribute(attr));
+      if (url && !isPlaceholder(url)) return url;
     }
-    const src = img.getAttribute('src') || img.currentSrc;
-    if (src && src.startsWith('http') && !isPlaceholder(src)) return src;
+    const url = normalizeHttpUrl(img.getAttribute('src') || img.currentSrc);
+    if (url && !isPlaceholder(url)) return url;
     return null;
   }
 
@@ -222,7 +194,7 @@
     }
   }
 
-  // ============ 移动版缩略图获取原理（2026-09-04 抓包 + 2026-09-13 复测） ============
+  // ============ 移动版缩略图获取原理 ============
   // 1. 核心机制：本站是 Discuz! X3.4 + n5 触屏模板，服务端只看请求头 User-Agent 分发模板。
   //    带 Android 移动 UA 请求 forum-{fid}-{page}.html，服务端直接返回触屏模板 HTML，
   //    其中每个帖子卡片是 <div class="n5_htmk">，缩略图真实地址在 <img data-original="https://tu.xxx/....jpg">。
@@ -233,44 +205,39 @@
   //      !supporttouch && (window.location.href = 'forum.php?mobile=1');
   //    PC 浏览器没有触摸事件，即使带移动 UA 打开页面也会被 JS 踢回标准手机版（无缩略图）。
   //    而 GM_xmlhttpRequest 只拿原始 HTML 不执行 JS，守门脚本完全不生效 → 稳定取到触屏模板。
+  //    〔实测复现〕同一移动 UA 关掉触屏模拟后 ontouchend=false → 确实跳 forum.php?mobile=1、
+  //    卡片数 0；开启触屏模拟则停在触屏模板。所以这不是保守，而是必需。
   //
   // 3. 反爬（WAF）依赖浏览器会话 Cookie：
-  //    站点有 _safe cookie 校验——不带 _safe 的请求只会收到约 900B 的 safeid JS 挑战页（isSafePage 可检测）。
+  //    站点有 _safe cookie 校验——不带 _safe 的请求只会收到 safeid JS 挑战页（isSafePage 可检测）。
   //    Tampermonkey 发 GM 请求时默认自动附上目标域名的浏览器 Cookie（_safe 随请求带出），
   //    下面 headers 里显式写的 Cookie: mobile=2 会被 TM「合并」到浏览器 Cookie 之后
   //    （TM 官方文档 cookie 条目 / 5.6.6239 更新日志 "merge given cookies"，不会覆盖丢失 _safe）。
-  //    若日志频繁出现"疑似被反爬拦截"多为请求过快被限流，内建重试会兜底。
-  //    ⚠️ v2.2 起本请求提前到 document-start：首次访问时 _safe 由主文档响应头写入，
-  //       文档开始执行时该 Cookie 已落库，因此提前发送是安全的；万一仍被拦，DOM 就绪后的
-  //       带重试流程会补一次（见 listPageMain）。
+  //    ⚠️ 本请求在 document-start 发出，此时 _safe 可能尚未建立（首次访问、浏览器重启后即是如此），
+  //       于是这次抢跑必然拿到门页并被判为"疑似被反爬拦截"——属预期，不是故障。
+  //       DOM 就绪后的带重试流程会补一次；若那时仍频繁被拦，多为请求过快被限流，内建重试会兜底。
   //
   // 4. 解析映射：.n5_htmk = 帖子卡片；卡片内 a[href*=viewthread] 的 tid=N 即帖子 ID
   //    （DOMParser 会把相对 href 解析成绝对地址，tid=(\d+) 正则照常命中）；
   //    缩略图地址由 getRealSrc 按 LAZY_ATTRS 依次探测（触屏模板用 data-original）；
-  //    用户头像(/uc_server/...)与站内占位图标已被 getRealSrc 的 uc_server / static/image 过滤排除。
-  //    实测命中率：forum-37 第 1/2/3/5 页均为「30 个帖子全部拿到映射，0 个需要回详情页兜底」。
+  //    用户头像(/uc_server/...)与站内占位图标已被 getRealSrc 的 uc_server / static_image 过滤排除。
+  //    实测命中率：forum-103 第 10~20 页共 11 页，全部为「30 个帖子拿到映射，0 个需回详情页兜底」。
   //
   // 5. mobile=2 双保险：URL 参数 + Cookie 都写 mobile=2，强制 Discuz 走触屏版（=2）
   //    而非标准手机版（=1，纯文字无图）。实测仅移动 UA 不带参数时服务端也会返回触屏模板，
   //    保留 mobile=2 意图更明确且无害。
   //
   // 6. 已知边界：置顶帖在移动版顶部是纯文字列表（无缩略图），因此 PC 列表的置顶行不会注入缩略图，
-  //    属预期行为（与移动版展示一致），非 bug。
+  //    属预期行为（与移动版展示一致），非 bug。〔实测〕该卡片没有 a[href*=viewthread]，被解析逻辑跳过。
   //
-  // 7. 缩略图图床实测（2026-09-13 修正 v2.2 的错误结论）：
-  //    · 图片只有原图，没有小图变体。响应头显示前端是 Cloudflare（CF-Cache-Status: HIT）、
-  //      回源 X-Canonical-Cache-Host: b2img.etboo.cc（Backblaze B2）。B2 是纯对象存储，
-  //      不提供图片处理，因此 ?w= / ?imageView2/ / ?x-oss-process= / ?imageMogr2/ 这类缩放参数
-  //      全部被忽略（实测 7 种写法 Content-Length 一律 174530，与不带参数完全一致）。
-  //      → 缩略图只能整张下载，省流量只能靠"少请求 / 按需请求"。
-  //    · 「追加查询串会被挂起」是错的：实测带 ?bsk=xxx 的 URL 70~72ms 正常返回同一张图，
-  //      可重复验证。v2.2 的这条注释已删除，避免误导后续优化。
-  //    · 图床要求 Referer 必须是本站（无 Referer 直接 403；带站点 Referer 200），
-  //      所以缩略图 <img> 绝不能设 referrerPolicy="no-referrer"。
-  //    · 浏览器会自动协商 WebP（Vary: accept；带 image/webp 的 Accept 头返回 image/webp），
-  //      无需脚本干预，实际下载量比 curl 测得的 JPEG 体积更小。
-  //    · Cache-Control: max-age=2592000（30 天），因此"冷缓存"只影响某个帖子第一次被看到；
-  //      同一帖子第二次出现必然命中缓存。
+  // 7. 缩略图图床特性（决定了只能"少请求/按需请求"，无法靠缩放省流量）：
+  //    · 只有原图，没有小图变体。前端 Cloudflare、回源 Backblaze B2（纯对象存储，不做图片处理），
+  //      ?w= / ?imageView2/ / ?x-oss-process= / ?imageMogr2/ 等缩放参数全部被忽略。
+  //    · 附加查询串安全：实测带 ?bsk=xxx 的 URL 70~72ms 正常返回同一张图（据此做过缓存破坏实验）。
+  //    · ⚠️ 图床要求 Referer 必须是本站（无 Referer 直接 403），所以缩略图 <img> 绝不能设
+  //      referrerPolicy="no-referrer"。
+  //    · 浏览器自动协商 WebP（Vary: accept），无需脚本干预，实际下载量小于 curl 测得的 JPEG 体积。
+  //    · Cache-Control: max-age=2592000（30 天），"冷缓存"只影响某个帖子第一次被看到。
   function fetchMobileThumbs(fid, page) {
     return new Promise((resolve) => {
       const sp = new URLSearchParams(location.search);
@@ -295,11 +262,10 @@
             const thumbs = doc.querySelectorAll('.n5_htmk');
             if (thumbs.length === 0) {
               // 空结果的两种根因要区分开：反爬拦截页 vs 自定义 UA 头未生效拿到 PC 版
-              // （v2.5 起复用 isSafePage，原先这里又内联写了一遍 indexOf —— 审计 #4）
               if (isSafePage(resp.responseText)) {
-                console.error('[色花堂缩略图] 移动版请求疑似被反爬拦截页挡下:', url);
+                console.warn('[色花堂缩略图] 移动版请求被 safe 挑战页挡下（document-start 抢跑时 _safe 尚未建立，首访/浏览器重启后属预期，DOM 就绪后会带重试重取）:', url);
               } else {
-                console.error('[色花堂缩略图] 未找到移动版结构(.n5_htmk)，可能自定义 User-Agent 头未生效而拿到了 PC 版页面');
+                console.warn('[色花堂缩略图] 未找到移动版结构(.n5_htmk)，可能自定义 User-Agent 头未生效而拿到了 PC 版页面');
               }
             }
             const mapping = {};
@@ -312,8 +278,8 @@
               const imgs = el.querySelectorAll('img');
               const urls = [];
               imgs.forEach(img => {
-                const src = getRealSrc(img);
-                if (src && src.startsWith('http') && !urls.includes(src)) {
+                const src = getRealSrc(img);   // 已归一化为 http(s) 绝对地址
+                if (src && !urls.includes(src)) {
                   urls.push(src);
                 }
               });
@@ -370,7 +336,7 @@
     #nv { width: 100% !important; left: 0 !important; right: 0 !important; }
   `;
 
-  // 页面级布局修正（v2.3：原先在列表/搜索/繁忙/详情/首页 5 处重复内联，现收敛为一处）
+  // 页面级布局修正
   const PAGE_CSS = `
     ${WIDE_CSS}
     #ct { width: auto !important; margin: 0 !important; padding: 0 10px !important; box-sizing: border-box !important; }
@@ -378,11 +344,15 @@
   `;
 
   // 缩略图相关 CSS
+  // · n1~n5 的 --img-width 必须与 MAX_THUMBS_PER_POST 联动（见该常量处的约束说明）
+  // · 书写顺序有讲究：通用 `img` 的 width:100% 必须放在 `> a / > img` 之前——两者特异性相同
+  //   （都是 1 类 + 1 类型），靠源顺序决胜；反过来的话无 <a> 包裹的图片会被撑满整行宽
+  // · 占位闪烁类名是 sehua-thumb-loading，与"加载中…"提示的 sehua-loading 刻意分开：
+  //   搜索页给 sehua-loading 定义了 padding:8px，若共用类名会把在途缩略图内缩 8px（实测少 12.5%）
   const THUMB_CSS = `
-    .sehua-thumb { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 8px; }
-    .sehua-thumb { --img-width: calc((100% - 32px) / 5); }
-    .sehua-thumb > a, .sehua-thumb > img { display: flex; align-items: center; justify-content: center; text-decoration: none; overflow: hidden; width: var(--img-width) !important; transition: width 0.2s ease; }
+    .sehua-thumb { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 8px; --img-width: calc((100% - 32px) / 5); }
     .sehua-thumb img { height: auto !important; aspect-ratio: 3/2; object-fit: cover; border-radius: 4px; border: 1px solid #ddd; background: #f5f5f5; box-sizing: border-box !important; width: 100% !important; transition: border-color 0.2s ease, transform 0.2s ease; }
+    .sehua-thumb > a, .sehua-thumb > img { display: flex; align-items: center; justify-content: center; text-decoration: none; overflow: hidden; width: var(--img-width) !important; transition: width 0.2s ease; }
     .sehua-thumb img:hover { border-color: #4a90d9; transform: scale(1.03); }
     .sehua-thumb.n1 { --img-width: 50%; }
     .sehua-thumb.n2 { --img-width: 40%; }
@@ -390,20 +360,18 @@
     .sehua-thumb.n4 { --img-width: calc((100% - 24px) / 4); }
     .sehua-thumb > a.portrait, .sehua-thumb > img.portrait { width: calc(var(--img-width) * 0.7) !important; }
     .sehua-thumb > a.portrait img, .sehua-thumb > img.portrait { aspect-ratio: 2/3; }
-    .sehua-thumb img.sehua-loading { background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%); background-size: 200% 100%; animation: sehua-shimmer 1.5s infinite; }
+    .sehua-thumb img.sehua-thumb-loading { background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%); background-size: 200% 100%; animation: sehua-shimmer 1.5s infinite; }
     @keyframes sehua-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
   `;
 
-  // 统一注入 <style>（v2.3：原先 6 处各自 createElement('style')，收敛为一处）
+  // 统一注入 <style>
   function addStyle(css) {
     const style = document.createElement('style');
     style.textContent = css;
     document.head.appendChild(style);
   }
 
-  // 强制容器内所有图片立即可见的页面级 CSS
-  // （v2.5 收敛审计 #3：搜索页 #threadlist 与详情页 #postlist 原各写一份，
-  //   四行内容逐字相同仅选择器不同；站点对懒加载图加 visibility:hidden 等图出来再显示）
+  // 强制容器内所有图片立即可见的页面级 CSS（搜索页传 #threadlist、详情页传 #postlist）
   function forceVisibleCSS(selector) {
     return `
       ${selector} img { opacity: 1 !important; visibility: visible !important; transition: none !important; }
@@ -421,9 +389,20 @@
     `);
   }
 
-  // 删除无用元素
+  // 删除无用元素 / 站内广告
+  // 实测：两个 `*.pad-tb-10` 选择器在本站命中 0（模板已不带 pad-tb-10），真正要清的是 .show-text2
+  // （表格内的博彩广告行）。那一行以前是被 processRow 的"删 td"顺手清掉的，属副作用，不能依赖，
+  // 故这里给出显式规则。
   function removeUnused() {
-    document.querySelectorAll('.show-text.cl, .show-text4.pad-tb-10, .show-text2.pad-tb-10, #f_pst, .wp.mtn, .h10, #newspecial, #newspecialtmp').forEach(el => el.remove());
+    document.querySelectorAll('.show-text.cl, .show-text2, .show-text4, #f_pst, .wp.mtn, .h10, #newspecial, #newspecialtmp').forEach(el => el.remove());
+    // 表格内不属于帖子的行整块移除：`separatorline`（空表头行，高 0）与博彩广告行（58px）。
+    // 实测该表每页恒定 32 个 tbody = 30 个 normalthread_ + 上述两个。
+    // 只按 id 前缀判定，并给含分页的行留一条后路，避免模板改动时误删导航。
+    document.querySelectorAll('#threadlisttableid tbody').forEach(tb => {
+      if (/^(normalthread_|stickthread_)/.test(tb.id)) return;
+      if (tb.querySelector('.pg')) return;
+      tb.remove();
+    });
   }
 
   // ============ 统一懒加载清除（列表/搜索/详情三页共用） ============
@@ -479,12 +458,11 @@
         }
       });
     });
-    // v2.3：attributeFilter 去掉 'class'。每张缩略图加载完都会 classList.remove('sehua-loading')，
-    // 分页/筛选也会成片改 class，而 forceEagerImg 只依赖 src / 懒加载属性，监听 class 纯属噪音。
-    // v2.5（审计 #7）：地址属性清单改由 LAZY_ATTRS 派生，与 getRealSrc 的探测表永不再脱钩
-    // （原先手写 8 个、与 LAZY_ATTRS 的 9 个不同步，data-thumb 等变化会漏监听）；
-    // 其余 4 个是状态属性：src/lazy/loadsrc 是站点脚本会改写的，data-lazy 是 forceEagerImg
-    // 自己会 removeAttribute 的。均为现清单的超集，只会多触发幂等回调，不会漏。
+    // attributeFilter 刻意不含 'class'：每张缩略图加载完都会改 class，分页/筛选也会成片改，
+    // 而 forceEagerImg 只依赖 src / 懒加载属性，监听 class 纯属噪音。
+    // 地址属性清单由 LAZY_ATTRS 派生（与 getRealSrc 的探测表永不脱钩），另补 4 个状态属性：
+    // src/lazy/loadsrc 是站点脚本会改写的，data-lazy 是 forceEagerImg 自己会 removeAttribute 的；
+    // 是现清单的超集，只会多触发幂等回调，不会漏。
     observer.observe(mainContainer(), {
       childList: true,
       subtree: true,
@@ -494,15 +472,12 @@
   }
 
   // 拦截 Discuz 懒加载（三页共用）
-  // 注解（2026-09-13 回归实测）：本覆盖对列表页属防御性冗余——实测列表页 107 张 img
-  // 全部是 static/image 占位图，PC 模板不依赖 lazyload/IO。保留是为防详情/搜索页
-  // 之外的未知动态场景；副作用可控：非 IMG 元素的 observe 仍走原生 IO（见下）。
-  // v2.4 沙箱修复：脚本带 @grant（沙箱模式）时，脚本内的 window 是包装对象——读取页面
-  // 全省会透传，但纯赋值（window.x = y）只写进沙箱，页面侧完全看不到。2026-09-13 回归
-  // 实测坐实：详情页页面上下文中 window.lazyload 仍是站点原库（function lazyload(className)
-  // 带 .imgs）、IntersectionObserver 仍是 [native code]——即下述全局覆盖自 v1.7 起从未生效，
-  // 功能一直靠 forceEagerImg 的 DOM 级防线（设 src + lazyloaded 标记，站点 showImage 碰到
-  // 标记即跳过）掩盖。因此对页面全局的读写一律改走 unsafeWindow。
+  // 【防御性保留，实测本站暂无对象】列表页 99 张 img 全是 static_image 占位/图标、img[data-original]
+  // 命中 0；详情页 41 张里仅 2 张内容图，且 loading=lazy / class*=lazy / data-original 全为 0。
+  // 即这两页本就没有懒加载可清，forceEagerImg 在此只是空转；保留是为了防未知模板变动，
+  // 副作用可控——非 IMG 元素的 observe 仍走原生 IO（见下）。
+  // ⚠️ 页面全局必须经 unsafeWindow 写入：脚本带 @grant 时脚本内的 window 是包装对象，
+  //    读取会透传、但纯赋值只写进沙箱，页面侧看不到（这曾使下述覆盖长期静默失效）。
   const pageWindow = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
 
   function interceptLazyLoad() {
@@ -552,9 +527,8 @@
   }
 
   // 三页通用的懒加载清理：立即清一遍 + 监听新增 + 覆盖构造函数
-  // watch=false 跳过 MutationObserver：仅首页使用——mainContainer() 在首页兜底到
-  // document.body，挂 Observer 等于监听整个文档（审计 #10，2026-09-13 回归坐实）；
-  // 实测首页 64 张图零懒加载、无动态新增场景，首轮 forceEagerAll 已全覆盖，不监听
+  // watch=false 仅首页使用：mainContainer() 在首页兜底到 document.body，挂 Observer 等于监听整个文档；
+  // 实测首页 64 张图零懒加载、无动态新增场景，首轮 forceEagerAll 已全覆盖，无需监听
   function scrubPageLazyLoad(watch = true) {
     forceEagerAll();
     if (watch) watchImages();
@@ -564,32 +538,29 @@
   // ============ 缩略图注入 ============
 
   // 创建缩略图容器
-  //   urls  该帖的图片地址（调用方已截断到 MAX_THUMBS_PER_POST）
-  //   tid   帖子 ID，非空时每张图包一层 <a target=_blank> 指向详情页
+  //   urls  该帖的图片地址（本函数内部也会按 MAX_THUMBS_PER_POST 封顶）
+  //   tid   帖子 ID，每张图包一层 <a target=_blank> 指向详情页（三个调用点都保证 tid 非空）
   //   eager true = 首屏（立即请求 + high 优先级）；false = 非首屏（原生懒加载，按需请求）
   function createThumbWrap(urls, tid, eager) {
     const wrap = document.createElement('div');
-    // v2.4.1 修复审计 #2：封顶值与 MAX_THUMBS_PER_POST 联动（原先硬编码 5，
-    // 调常量会导致 slice 给 8 张、class 仍是 n5，按 5 列宽排版错位）
+    // 封顶值必须与 MAX_THUMBS_PER_POST 联动：调大常量时若 class 仍是 n5，多出的图会按 5 列宽排版错位
     const n = Math.min(Math.max(urls.length, 1), MAX_THUMBS_PER_POST);
     wrap.className = 'sehua-thumb n' + n;
-    const href = tid ? `https://${location.hostname}/thread-${tid}-1-1.html` : null;
+    const href = `https://${location.hostname}/thread-${tid}-1-1.html`;
 
     urls.forEach(url => {
       const img = document.createElement('img');
       img.decoding = 'async';   // 异步解码：解码不阻塞主线程渲染
-      img.classList.add('sehua-loading');
+      img.classList.add('sehua-thumb-loading');
 
-      const container = href ? document.createElement('a') : img;
-      if (href) {
-        container.href = href;
-        container.target = '_blank';
-        container.appendChild(img);
-      }
+      const container = document.createElement('a');
+      container.href = href;
+      container.target = '_blank';
+      container.appendChild(img);
       wrap.appendChild(container);
 
       const onload = () => {
-        img.classList.remove('sehua-loading');
+        img.classList.remove('sehua-thumb-loading');
         // 竖图（高>宽）单独缩小并改用 2/3 比例，避免被 3/2 的裁剪框切掉主体
         if (img.naturalHeight > img.naturalWidth) container.classList.add('portrait');
       };
@@ -603,10 +574,9 @@
       img.addEventListener('load', onload, { once: true });
       img.addEventListener('error', onerror, { once: true });
 
-      // 缓存兜底（v2.5 审计 #15：两分支对称）：complete 为 true 后不会再触发
-      // load/error 事件——naturalWidth === 0 是被浏览器缓存住的失败结果，必须直接
-      // 走 onerror，否则该图会带着 shimmer 占位永远卡住。lazy 图在预取距离内时
-      // 同样可能立即命中缓存完成，事件或已派发完毕，监听器收不到回调。
+      // 缓存兜底：complete 为 true 后不会再触发 load/error 事件——naturalWidth === 0 是被浏览器
+      // 缓存住的失败结果，必须直接走 onerror，否则该图会带着 shimmer 占位永远卡住；
+      // lazy 图在预取距离内也可能立即命中缓存完成，事件已派发完毕，监听器收不到回调。
       // 手动结算与后续事件重复触发均幂等（onload 移 class 可重复、onerror remove 可重复）
       const settleIfComplete = () => {
         if (img.complete) {
@@ -650,7 +620,9 @@
   }
 
   // 处理单个 tr
+  // 只处理真正的帖子行：表头行（tbody#separatorline）与博彩广告行等非帖子行不参与单列化与删 td
   function processRow(tr, thumbMap) {
+    if (!tr.closest('tbody[id^=normalthread_], tbody[id^=stickthread_]')) return;
     const th = tr.querySelector('th');
     const tps = th?.querySelector('.tps');
     const firstBy = tr.querySelector('td.by');
@@ -678,7 +650,7 @@
 
   // 处理表格
   function processTable(thumbMap) {
-    let injected = 0, moved = 0, eager = 0;
+    let injected = 0, moved = 0, eagerPosts = 0, eagerImgs = 0;
     document.querySelectorAll('#threadlisttableid tr').forEach(tr => {
       const th = tr.querySelector('th');
       const hadThumb = th?.querySelector('.sehua-thumb');
@@ -688,11 +660,13 @@
 
       if (!hadThumb && th?.querySelector('.sehua-thumb')) {
         injected++;
-        if (th.querySelector('.sehua-thumb img[fetchpriority="high"]')) eager++;
+        // 单位注意：这里计的是"帖"，实际张数要另算（实测每帖 2 张，故首屏 2 帖 = 4 张）
+        const highImgs = th.querySelectorAll('.sehua-thumb img[fetchpriority="high"]').length;
+        if (highImgs > 0) { eagerPosts++; eagerImgs += highImgs; }
       }
       if (!hadEm && th?.querySelector('.tps em')) moved++;
     });
-    console.log(`[色花堂缩略图] 注入 ${injected} 个缩略图（${eager} 个在首屏内立即加载，其余交给原生按需加载），移动 ${moved} 个日期`);
+    log(`注入 ${injected} 个缩略图（首屏 ${eagerPosts} 帖 / ${eagerImgs} 张立即加载，其余交给原生按需加载），移动 ${moved} 个日期`);
   }
 
   // ============ 移动版缩略图缓存与预连接 ============
@@ -700,41 +674,104 @@
   const thumbCache = {};
   const pendingPages = {};
 
+  // 会话级持久缓存：移动版映射的 TTL 与条数上限
+  // 【为什么值得缓存】实测页面 DOM 约 425ms 就绪，而映射到达约 1.4s —— 首图在映射到达前无法开始，
+  // 这段等待是首图关键路径上最大的一块。帖子列表变动不快，5 分钟内的同页复用足够安全。
+  const PAGE_CACHE_KEY = 'sehuaPageCache';
+  const PAGE_CACHE_TTL = 5 * 60 * 1000;
+  const PAGE_CACHE_MAX = 10;
+
+  function readPageCache(key) {
+    try {
+      const hit = JSON.parse(sessionStorage.getItem(PAGE_CACHE_KEY) || '{}')[key];
+      if (hit && Date.now() - hit.t < PAGE_CACHE_TTL && mobileResultOk(hit.v)) return hit.v;
+    } catch (e) {}
+    return null;
+  }
+
+  function writePageCache(key, value) {
+    try {
+      const all = JSON.parse(sessionStorage.getItem(PAGE_CACHE_KEY) || '{}');
+      all[key] = { t: Date.now(), v: value };
+      const keys = Object.keys(all);
+      if (keys.length > PAGE_CACHE_MAX) keys.slice(0, keys.length - PAGE_CACHE_MAX).forEach(k => { delete all[k]; });
+      sessionStorage.setItem(PAGE_CACHE_KEY, JSON.stringify(all));
+    } catch (e) {}
+  }
+
   // 取某一页的移动版缩略图映射
   //   allowRetry=false 用于「文档开始时抢跑」的那次：只发一次，不与页面加载争资源；
-  //   失败结果不写入缓存、并清空 pending，让 DOM 就绪后的带重试流程可以重新发起。
+  //   失败结果不写入任何缓存，让 DOM 就绪后的带重试流程可以重新发起。
   function fetchMobileThumbsByPage(fid, page, allowRetry = true) {
     const key = fid + '_' + page;   // 缓存键带 fid，避免跨版块同页码串缓存
     if (thumbCache[key]) return Promise.resolve(thumbCache[key]);
+    const persisted = readPageCache(key);            // 会话级缓存命中：直接省掉整次移动版请求
+    if (persisted) { thumbCache[key] = persisted; return Promise.resolve(persisted); }
     if (pendingPages[key]) return pendingPages[key];
     const fetchPromise = (allowRetry ? fetchMobileThumbsWithRetry(fid, page) : fetchMobileThumbs(fid, page))
       .then(result => {
         // 只缓存有效结果：拦截页/空响应不缓存，下次还能重试
-        if (mobileResultOk(result)) thumbCache[key] = result;
-        delete pendingPages[key];
+        if (mobileResultOk(result)) {
+          thumbCache[key] = result;
+          writePageCache(key, result);
+        }
         return result;
-      });
+      })
+      .finally(() => { delete pendingPages[key]; });  // 异常路径同样清理，否则同键此后一直拿到 rejected Promise
     pendingPages[key] = fetchPromise;
     return fetchPromise;
   }
 
-  // 对缩略图所在域名预建连接（DNS + TCP + TLS），缩短首图耗时。
+  // ============ 缩略图图床的预连接 ============
+  // 【为什么要"学"域名】图床与站点不同源，首个缩略图必须新开一次 DNS+TCP+TLS；而该域名一旦出现就
+  // 长期稳定（实测 forum-103 的 10/11/12/13 页恒为同一域名）。把域名记下来，下次进列表页就能在
+  // document-start 就预连接，把握手挪进"等待移动版映射"那段窗口里。
+  // 只在拿到映射后才连，等于与图片请求同时起跑，收益≈0。
   // 注意不要加 crossorigin：本站缩略图是普通 <img>（非 CORS 请求），加了反而会多建一条连接。
-  function preconnectImageHosts(mapping) {
-    if (!document.head) return;   // document-start 阶段 <head> 可能尚未建立
+  const IMG_HOST_KEY = 'sehuaImgHosts';
+  const IMG_HOST_MAX = 4;
+
+  function collectImageHosts(mapping) {
     const hosts = new Set();
     Object.values(mapping).forEach(urls => urls.forEach(u => {
       try { hosts.add(new URL(u, location.origin).origin); } catch (e) {}
     }));
-    hosts.forEach(h => {
-      if (h === location.origin) return;
-      // 去重：自动加载多批时会重复调用，避免插入相同域名的多个 preconnect
-      if (document.querySelector(`link[rel="preconnect"][href="${h}"]`)) return;
-      const link = document.createElement('link');
-      link.rel = 'preconnect';
-      link.href = h;
-      document.head.appendChild(link);
-    });
+    hosts.delete(location.origin);
+    return [...hosts];
+  }
+
+  // 挂一条 preconnect。document-start 时 <head>/<html> 可能都还没建立，短暂重试即可
+  // （映射到达通常在 1s 之后，几次 20ms 的延迟不影响收益）
+  function preconnectHost(origin, tries = 0) {
+    if (!origin || origin === location.origin) return;
+    const parent = document.head || document.documentElement;
+    if (!parent) {
+      if (tries < 10) setTimeout(() => preconnectHost(origin, tries + 1), 20);
+      return;
+    }
+    if (document.querySelector(`link[rel="preconnect"][href="${origin}"]`)) return;   // 去重
+    const link = document.createElement('link');
+    link.rel = 'preconnect';
+    link.href = origin;
+    parent.appendChild(link);
+  }
+
+  // document-start 调用：用上次学到的图床域名抢先握手（首次访问时列表为空，无副作用）
+  function preconnectLearnedHosts() {
+    try {
+      JSON.parse(localStorage.getItem(IMG_HOST_KEY) || '[]').forEach(h => preconnectHost(h));
+    } catch (e) {}
+  }
+
+  // 映射到手后：立即连（兜底）+ 记住域名（供下次提前连）
+  function preconnectImageHosts(mapping) {
+    const hosts = collectImageHosts(mapping);
+    hosts.forEach(h => preconnectHost(h));
+    if (hosts.length === 0) return;
+    try {
+      const prev = JSON.parse(localStorage.getItem(IMG_HOST_KEY) || '[]');
+      localStorage.setItem(IMG_HOST_KEY, JSON.stringify([...new Set([...hosts, ...prev])].slice(0, IMG_HOST_MAX)));
+    } catch (e) {}
   }
 
   // ============ 详情页取图（fallback） ============
@@ -762,8 +799,8 @@
               const imgs = doc.querySelectorAll('.t_f img, .pcb img, .message img');
               const urls = [];
               imgs.forEach(img => {
-                const u = getRealSrc(img);
-                if (u && u.startsWith('http') && urls.indexOf(u) === -1 && urls.length < MAX_DETAIL_IMGS) urls.push(u);
+                const u = getRealSrc(img);   // 已归一化为 http(s) 绝对地址
+                if (u && urls.indexOf(u) === -1 && urls.length < MAX_DETAIL_IMGS) urls.push(u);
               });
               resolve(urls);
             } catch (e) {
@@ -809,10 +846,12 @@
 
   // ============ 列表页自动加载监听 ============
   //
-  // ⚠️ 2026-09-13 未能实测复现：站点确实加载了 static/js/autoloadpage.js、#autopbn 也存在且可见
-  //    （rel="forum.php?mod=forumdisplay&fid=37&page=6"），但在 Agent Window 的后台标签页里
-  //    滚到底部不外乎 document.hidden === true，站点的滚动加载始终没触发，无法取样。
-  //    该分支按 Discuz 原版行为保留（校验、回滚、去重逻辑本身是自洽的），但属于"未经真实触发验证"。
+  // ⚠️ 至今未能实测复现：站点确实加载了 static/js/autoloadpage.js、#autopbn 也存在且可见
+  //    （rel="forum.php?mod=forumdisplay&fid=103&page=21"），但两种环境下滚到页底都没触发：
+  //    ① Agent Window 后台标签页（document.hidden === true）；② 窗口切到前台（visible）后
+  //    从顶部逐段滚到页底并等待 4s —— tbody 仍是 32→32，站点没有追加任何行。
+  //    该分支按 Discuz 原版行为保留（校验、回滚、去重逻辑本身自洽），但属"未经真实触发验证"；
+  //    若后续确认站点不再追加 tbody，这整段可直接删除。
 
   function watchAutoLoad(fid, initialPage) {
     const table = document.getElementById('threadlisttableid');
@@ -829,7 +868,7 @@
       if (pendingTbodies.length === 0) return;
       const batch = pendingTbodies.splice(0);
       const targetPage = loadedPage + 1;
-      console.log(`[色花堂缩略图] 自动加载第 ${targetPage} 页内容，处理 ${batch.length} 个帖子`);
+      log(`自动加载第 ${targetPage} 页内容，处理 ${batch.length} 个帖子`);
       // 先完成单列化与日期搬移（此时还没有缩略图映射，只做结构处理）
       batch.forEach(tb => {
         const tr = tb.querySelector('tr');
@@ -905,7 +944,7 @@
       }
     });
     observer.observe(table, { childList: true, subtree: true });
-    console.log('[色花堂缩略图] 已监听自动加载，起始页 ' + initialPage);
+    log('已监听自动加载，起始页 ' + initialPage);
   }
 
   // ============ 搜索页逻辑 ============
@@ -983,7 +1022,7 @@
           && !li.querySelector('.sehua-thumb')
           && !li.querySelector('.sehua-loading')
           && !li.dataset.sehuaChecked);                    // 已确认无图的帖不重复请求
-      console.log(`[色花堂缩略图] 搜索页加载 ${allLis.length} 个可见帖子的详情图（并发${MAX_CONCURRENT}）`);
+      log(`搜索页加载 ${allLis.length} 个可见帖子的详情图（并发${MAX_CONCURRENT}）`);
 
       const pool = new ConcurrencyPool(MAX_CONCURRENT);
       const tasks = allLis.map(li => pool.add(async () => {
@@ -1025,9 +1064,9 @@
     addStyle(`
       ${PAGE_CSS}
       ${THUMB_CSS}
-      .sehua-loading { color: #999; font-size: 12px; text-align: center; padding: 8px; }
+      /* 限定到 div：缩略图的占位闪烁用 sehua-thumb-loading，两者不能混，否则在途缩略图会被这里的内边距挤小 */
+      div.sehua-loading { color: #999; font-size: 12px; text-align: center; padding: 8px; }
       .slst.mtw { width: 100% !important; }
-      /* 搜索页：强制所有图片立即显示（v2.5 收敛，见 forceVisibleCSS） */
       ${forceVisibleCSS('#threadlist')}
     `);
 
@@ -1037,7 +1076,7 @@
     const switchWrap = addForumSwitches();
     if (!switchWrap) {
       // 未登录时 search.php 只返回空壳，没有 .sttl.mbn，直接跳过
-      console.log('[色花堂缩略图] 未找到 .sttl.mbn，跳过搜索页处理');
+      log('未找到 .sttl.mbn，跳过搜索页处理');
       return;
     }
     switchWrap.classList.add('sehua-forum-switch');
@@ -1074,7 +1113,7 @@
       return false;
     }
     sessionStorage.setItem(BUSY_RETRY_KEY, String(retryCount + 1));
-    console.log(`[色花堂缩略图] 检测到"搜索繁忙"（第${retryCount + 1}次），4 秒后自动刷新`);
+    log(`检测到"搜索繁忙"（第${retryCount + 1}次），4 秒后自动刷新`);
 
     addStyle(PAGE_CSS);
 
@@ -1099,13 +1138,12 @@
   // ============ 详情页主流程 ============
 
   function detailPageMain() {
-    console.log('[色花堂缩略图] 详情页模式');
+    log('详情页模式');
     addStyle(`
       ${PAGE_CSS}
       #postlist { width: 100% !important; }
       #postlist ignore_js_op img.zoom { display: block; margin-left: auto; margin-right: auto; }
       #postlist ignore_js_op { text-align: center; }
-      /* 详情页：强制所有图片立即显示（v2.5 收敛，见 forceVisibleCSS） */
       ${forceVisibleCSS('#postlist')}
     `);
 
@@ -1116,12 +1154,10 @@
   // ============ 首页主流程 ============
 
   function homePageMain() {
-    console.log('[色花堂缩略图] 首页模式');
+    log('首页模式');
     addStyle(PAGE_CSS);
     removeUnused();
-    // v2.3：与其余页面统一，首页同样清一遍懒加载（原先首页漏掉了这一步，
-    // 首页若有 loading=lazy 图会停在占位态）
-    // v2.4：watch=false，首页不挂 MutationObserver（见 scrubPageLazyLoad 注释）
+    // watch=false：首页不挂 MutationObserver（见 scrubPageLazyLoad 注释）
     scrubPageLazyLoad(false);
   }
 
@@ -1130,15 +1166,16 @@
   async function listPageMain() {
     const { fid, page } = getPageInfo();
     if (!fid) {
-      console.log('[色花堂缩略图] 非列表页，跳过');
+      log('非列表页，跳过');
       return;
     }
 
     // URL 是列表页但不代表正文就是帖子表格。
-    // 首次访问（还没有 _safe Cookie）时服务端返回「18+ 年龄门」中间页，URL 仍是 forum-103-1.html；
-    // 此时既没有行可以注入，移动版请求也会被反爬挡下。直接退出，省掉 3 次请求 + 2×1.5s 退避。
+    // 首次访问 / 浏览器重启后（_safe 尚未建立）服务端返回「18+ 年龄门」中间页，URL 仍是 forum-103-1.html；
+    // 此时既没有行可以注入，移动版请求也会被挡下。直接退出，省掉 3 次请求 + 2×1.5s 退避。
     if (!document.getElementById('threadlisttableid')) {
-      console.log('[色花堂缩略图] 页面无帖子表格（疑似 18+ 年龄门/异常页），跳过列表页处理');
+      log('页面无帖子表格（18+ 年龄门或异常页），跳过列表页处理；'
+        + 'document-start 的抢跑请求在这种页面必然拿到门页、被判为"被 safe 挑战页挡下"，属预期而非故障');
       return;
     }
 
@@ -1149,25 +1186,21 @@
     const pageNo = parseInt(page);
     watchAutoLoad(fid, pageNo);
 
-    console.log(`[色花堂缩略图] 请求移动版: forum-${fid}-${page}.html`);
-    // 直接消费文档开始时抢跑的那个 Promise（v2.4.1 修复审计 #1）。
-    // 旧写法 fetchMobileThumbsByPage(fid, pageNo, false) 有个隐蔽缺陷：抢跑失败时
-    // 缓存未写入、pending 已删除，这次调用不会命中任何复用路径，而是真的再发一次
-    // 「不带重试」的请求——失败路径白付 1 次请求 + 1 个 RTT（最坏 1+1+3=5 次）。
-    // 成功路径下两种写法行为完全一致（命中缓存/pending）；Promise 可重复 await。
+    log(`请求移动版: forum-${fid}-${page}.html?mobile=2（移动 UA）`);
+    // 直接消费文档开始时抢跑的那个 Promise：Promise 可重复 await，成功路径命中缓存/pending，
+    // 失败路径也不必再补发一次「不带重试」的请求
     let result = earlyListFetch ? await earlyListFetch : null;
     if (!result || !mobileResultOk(result)) {
-      console.log('[色花堂缩略图] 抢跑请求无效，改为带重试获取');
+      log('抢跑请求无效，改为带重试获取');
       result = await fetchMobileThumbsByPage(fid, pageNo, true);
     }
-    // 防御性解构：带重试流程同样可能给出非预期结果（GM API 缺失/异常、上游改签名）。
-    // 后续全部改用局部变量，不再直接链式访问 result.mapping / result.fallbackTids ——
-    // 否则一处 null 就会让整页缩略图静默消失（异常被 onDomReady 的 catch 吞掉）
+    // 防御性解构：带重试流程同样可能给出非预期结果（GM API 缺失/异常、上游改签名），
+    // 一旦直接链式访问 result.mapping 就可能整页静默无图（异常会被 onDomReady 的 catch 吞掉）
     const mapping = (result && result.mapping) || {};
     const fallbackTids = (result && result.fallbackTids) || [];
-    console.log(`[色花堂缩略图] 获取到 ${Object.keys(mapping).length} 个帖子的缩略图，${fallbackTids.length} 个需从详情页加载`);
+    log(`获取到 ${Object.keys(mapping).length} 个帖子的缩略图，${fallbackTids.length} 个需从详情页加载`);
 
-    // 对缩略图域名预建连接，加速图片请求（抢跑分支已在文档开始时建过，这里会去重）
+    // 预连接已学到的图床域名（抢跑分支在 document-start 已经连过，这里会自动去重）
     preconnectImageHosts(mapping);
 
     processTable(mapping);
@@ -1186,15 +1219,16 @@
 
   // ============ 入口 ============
   // @run-at document-start：本函数体在 <html> 解析前执行，此时只有 location 可用、DOM 还不存在。
-  // 实测（forum-103-1.html，冷启动）：DOMContentLoaded 约 3.35s，移动版请求本身约 757ms，
-  // 旧版要等 DOM 就绪才发请求 → 首张缩略图约 4.9s 才出现。
-  // 因此这里把「不依赖 DOM」的移动版请求提前发出，与页面自身的 HTML/CSS/JS 加载并行；
-  // 所有 DOM 相关处理统一推迟到 DOMContentLoaded，逻辑与旧版保持一致。
+  // 把两件不依赖 DOM 的事提前做掉：① 用上次学到的图床域名抢先握手；② 发出移动版请求。
+  // 两者都与页面自身的 HTML/CSS/JS 加载并行；其后的 DOM 处理统一等 DOMContentLoaded。
   const earlyPageInfo = getPageInfo();
   let earlyListFetch = null;
+
+  // 图床域名是长期稳定的，用上次学到的域名在 t=0 就建连，把握手挪出图片关键路径
+  preconnectLearnedHosts();
+
   if (earlyPageInfo.fid) {
     earlyListFetch = fetchMobileThumbsByPage(earlyPageInfo.fid, parseInt(earlyPageInfo.page), false);
-    // 请求一返回就先握手缩略图 CDN，把 DNS/TCP/TLS 也挪到 DOM 之前的并行窗口里
     // catch 必须补：GM API 缺失或抛同步异常时这个 Promise 会 reject，
     // 没有 catch 就是 unhandled rejection（控制台噪音，且掩盖真实失败原因）。
     // 这里失败无需处理——DOM 就绪后 listPageMain 仍会用带重试的流程重取一次
@@ -1210,7 +1244,7 @@
       if (autoReloadOnSearchBusy()) return;
 
       if (location.pathname.indexOf('/search.php') !== -1) {
-        console.log('[色花堂缩略图] 搜索页模式');
+        log('搜索页模式');
         await searchPageMain();
         return;
       }
