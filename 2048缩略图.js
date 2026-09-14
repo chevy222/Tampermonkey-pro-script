@@ -127,12 +127,20 @@
     var preconnectedHosts = {};
     var PRECONNECT_RETRY = 25;   // 4ms × 25 ≈ 100ms，足够等到 <head>/<html> 建立
 
-    function preconnectImgHost(img) {
-        var src = img.getAttribute('src') || '';
-        if (src.indexOf('http') !== 0 && src.indexOf('//') !== 0) return;
+    // 预连接的目标地址：优先用"真正会被请求的地址"。
+    // ⚠️ 懒加载页面的图地址在 data-src / data-srcset 里，页面上的 src 往往只是占位图；
+    //    只看 src 会把这类页面上的所有外域图床整页漏掉（守卫读到占位图直接 return）。
+    function imageTargetUrl(img, plan) {
+        if (plan && plan.kind === 'src') return plan.value;
+        if (plan && plan.kind === 'srcset') return plan.first;
+        return img.getAttribute('src') || '';
+    }
+
+    function preconnectImgHost(url) {
+        if (!url || (url.indexOf('http') !== 0 && url.indexOf('//') !== 0)) return;
         var origin;
         try {
-            var u = new URL(src, location.href);
+            var u = new URL(url, location.href);
             if (u.host === location.host) return;
             origin = u.origin;
         } catch (e) { return; }
@@ -314,8 +322,9 @@
         // 规避图床防盗链导致的"页内灰底、直开秒出"；decoding=async 避免解码阻塞渲染
         img.referrerPolicy = 'no-referrer';
         img.decoding = 'async';
-        // 图床域名预连接（内部按 origin 去重，重复调用开销可忽略）
-        preconnectImgHost(img);
+        // 图床域名预连接（按 origin 去重，重复调用开销可忽略）：
+        // 传"真正会被请求的地址"，而不是只读 src —— 见 imageTargetUrl 的说明
+        preconnectImgHost(imageTargetUrl(img, plan));
 
         if (plan.kind === 'src' || plan.kind === 'srcset') {
             // 真实地址先挂在 _plan 上，等窗口判定通过、真正要发请求时才写进 src / srcset；
