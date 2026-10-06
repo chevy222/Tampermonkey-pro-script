@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         2048缩略图
-// @namespace    https://bbs.vsbskpo.com/
+// @namespace    https://fby.hfz300.com/
 // @version      2.8
 // @description  视口窗口按需加载缩略图：窗口内的图立刻加载（视口内的标 fetchpriority=high），窗口外的滚到附近才加载；10 秒后兜底放行所有尚未激活的缩略图（仅页面可见时执行，后台标签页不预下载）。附带：图床域名 preconnect、移除占位图与广告、隐藏侧栏、"无 Referer" 请求规避图床防盗链、失败后穿透缓存有限次重试、节点复用换图时自动重置状态。
 // @author       Chevy Yang
-// @match        https://bbs.vsbskpo.com/*
+// @match        https://bbs.hdaksog.com/*
 // @noframes
 // @run-at       document-start
 // @grant        none
