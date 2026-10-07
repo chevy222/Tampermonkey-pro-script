@@ -34,8 +34,7 @@
     // 超时不算——一次冷启动抖动不该把整个域名判死。任一成功即清零
     var HOST_FAIL_THRESHOLD = 3;
 
-    // 进度提示：开始加载后这么久还没结算完才显示；全部结算后延迟这么久消失
-    var PROGRESS_SHOW_DELAY_MS = 300;
+    // 加载状态：全部结算后延迟这么久开始淡出（淡出 0.3s，再 0.4s 后移除）
     var PROGRESS_HIDE_DELAY_MS = 2500;
 
     // 广告与无用块，命中即整块移除
@@ -60,12 +59,14 @@
             '[style*="thumb-ing"]{background-image:none!important;}',
             // 侧栏（详情页作者信息卡）
             '.r_two{display:none!important;}',
-            // 右下角加载进度
-            '#thumb-progress{position:fixed;right:16px;bottom:16px;z-index:2147483646;' +
-                'padding:8px 14px;border-radius:8px;background:rgba(17,24,39,.88);color:#f9fafb;' +
-                'font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;' +
-                'pointer-events:none;box-shadow:0 4px 14px rgba(0,0,0,.25);}' +
-            '#thumb-progress.thumb-progress-done{background:rgba(5,150,105,.9);}'
+            // 右下角加载状态。样式与色花堂缩略图保持一致：
+            // 加载中黑底、全部成功绿底、有失败橙底，结算后淡出
+            '#thumb-progress{position:fixed;right:14px;bottom:14px;z-index:2147483646;' +
+                'padding:7px 14px;border-radius:999px;background:rgba(0,0,0,.75);color:#fff;' +
+                'font-size:12px;line-height:1.4;box-shadow:0 2px 10px rgba(0,0,0,.25);' +
+                'transition:opacity .3s ease;pointer-events:none;}' +
+            '#thumb-progress.thumb-progress-done{background:rgba(35,120,60,.85);}' +
+            '#thumb-progress.thumb-progress-partial{background:rgba(150,70,20,.88);}'
         ].join('\n');
         (document.head || document.documentElement).appendChild(s);
     }
@@ -113,43 +114,51 @@
         }
     }
 
-    /* ============================== 加载进度 ============================== */
+    /* ============================== 加载状态 ============================== */
 
     var badge = null;
-    var badgeReady = false;
-    var badgeClosed = false;
-    var badgeStartTimer = null;
+    var hideTimer = null;
+    var removeTimer = null;
 
     var totalCount = 0;      // 已登记进窗口的图片总数
     var finishedCount = 0;   // 已结算（成功或放弃）
     var failedCount = 0;     // 其中放弃的
 
-    function startProgress() {
-        if (badgeStartTimer || badgeReady) return;
-        badgeStartTimer = setTimeout(function () {
-            badgeReady = true;
-            renderProgress();
-        }, PROGRESS_SHOW_DELAY_MS);
-    }
-
     function renderProgress() {
-        if (!badgeReady || badgeClosed || !totalCount) return;
-        if (!badge) {
-            if (!document.body) { setTimeout(renderProgress, 100); return; }
+        if (!totalCount) return;
+        if (!badge || !badge.isConnected) {
+            var parent = document.body || document.documentElement;
+            if (!parent) return;
             badge = document.createElement('div');
             badge.id = 'thumb-progress';
-            document.body.appendChild(badge);
+            parent.appendChild(badge);
         }
-        if (finishedCount < totalCount) {
-            badge.textContent = '图片加载中 ' + finishedCount + '/' + totalCount;
+        // 图片是边解析边登记的，totalCount 会一直涨到解析结束，
+        // 所以"全部结算完"必须加上解析结束这个条件，否则第一张图结算时就会误判成终态
+        var done = finishedCount >= totalCount && document.readyState !== 'loading';
+        badge.classList.toggle('thumb-progress-done', done && failedCount === 0);
+        badge.classList.toggle('thumb-progress-partial', done && failedCount > 0);
+        if (!done) {
+            // 又有新图登记（或某张图开始重试）：撤销已经排上的淡出，继续显示进度
+            clearTimeout(hideTimer); hideTimer = null;
+            clearTimeout(removeTimer); removeTimer = null;
+            badge.style.opacity = '';
+            badge.textContent = '缩略图加载中 ' + finishedCount + '/' + totalCount;
             return;
         }
-        badge.classList.add('thumb-progress-done');
         badge.textContent = failedCount
-            ? '图片 ' + (totalCount - failedCount) + '/' + totalCount + '（' + failedCount + ' 张失败）'
-            : '图片 ' + totalCount + ' 张已加载';
-        badgeClosed = true;
-        setTimeout(function () { if (badge) badge.remove(); }, PROGRESS_HIDE_DELAY_MS);
+            ? '缩略图 ' + (totalCount - failedCount) + '/' + totalCount + '（' + failedCount + ' 张失败）'
+            : '缩略图 ' + totalCount + ' 张已加载';
+        if (hideTimer) return;
+        hideTimer = setTimeout(function () {
+            hideTimer = null;
+            if (!badge) return;
+            badge.style.opacity = '0';
+            removeTimer = setTimeout(function () {
+                removeTimer = null;
+                if (badge) badge.remove();
+            }, 400);
+        }, PROGRESS_HIDE_DELAY_MS);
     }
 
     /* ============================== 加载调度 ============================== */
@@ -318,7 +327,7 @@
         img.decoding = 'async';
         preconnectHost(host);
         watchImg(img);
-        if (!img._counted) { img._counted = true; totalCount++; startProgress(); }
+        if (!img._counted) { img._counted = true; totalCount++; renderProgress(); }
 
         // 已经抓完的图（命中缓存、或站点在脚本接管前就把请求发出去了）：直接结算，不再重发
         if (img.complete && img.naturalWidth > 0) {
@@ -451,10 +460,12 @@
     /* ============================== 启动 ============================== */
 
     // 解析期已经由 MutationObserver 逐节点登记，DOM 就绪后再全量扫一遍，
-    // 兜住极少数没走 addedNodes 分支的节点
+    // 兜住极少数没走 addedNodes 分支的节点；同时补渲染一次状态，
+    // 让"图在解析结束前就全部结算完"的情况也能收敛到终态
     function onDomReady() {
         sweep(document);
         removeMatching(document);
+        renderProgress();
     }
 
     if (document.readyState === 'loading') {

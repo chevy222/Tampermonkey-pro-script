@@ -40,7 +40,7 @@
 - **统一起跑**：站点给缩略图标的是原生 `loading=lazy`，而浏览器的视距阈值会越过任何窗口把整页请求一次性打出去（实测 47 张里有 40 张会被浏览器自己抓走）。所以脚本把窗口外的 `src` 摘下来、把 `loading` 改成 `eager`，轮到它时才写回地址发请求。
 - **失败处理**：`error` 后按 `IMG_RETRY_BASE_MS` 的倍数退避重试（首两次用原地址，之后换查询串绕开已缓存的失败结果）；单张图受 `IMG_TOTAL_WAIT_MS` 约束；用尽后压暗标记，点击重新排队再试。
 - **死图床熔断**：同一域名连续 `HOST_FAIL_THRESHOLD` 次**硬失败**（浏览器派发 `error`：DNS 失败 / 连接被拒 / HTTP 错误）后，该域名尚未开始的图直接判失败。**超时不算**——一次冷启动抖动不该把整个域名判死；任一成功即清零。
-- **加载进度**：右下角常驻 `图片加载中 12/47`，全部结算后变成 `图片 47 张已加载`（有失败时是 `图片 44/47（3 张失败）`），`PROGRESS_HIDE_DELAY_MS` 后自动消失。
+- **加载状态**：右下角常驻一个胶囊，样式与 `色花堂缩略图` 一致——加载中黑底 `缩略图加载中 12/47`，全部成功绿底 `缩略图 47 张已加载`，有失败橙底 `缩略图 44/47（3 张失败）`；结算后 `PROGRESS_HIDE_DELAY_MS` 淡出。
 - **去广告**：`.recs-wrapper` / `.recs-head` / `.recs-row` / `.recs-pill` / `.nav-container` / `.movie-banner` 命中即整块移除；侧栏 `.r_two` 用 CSS 隐藏而不是删除，避免影响站点自身的布局计算。`.reward-card` 是站点的打赏功能卡，不删。
 - **占位图**：站点给每个缩略图容器挂了 inline 的 `background-image: url(images/thumb-ing.gif)`（59KB，`background-size:cover` 会把它放大铺满整格）。脚本把它置空，这张图不再下载，未出图的格子露出父容器 `.display` 的 `#ced4da` 底色。
 - **图床 preconnect**：`src` 被摘掉后 preload scanner 看不到图床地址，首次握手只能由脚本提前完成（实测单次 TCP+TLS ≈ 340ms）；按 origin 去重，不加 `crossorigin`（缩略图是普通 `<img>` 非 CORS 请求），https 页面里的 http 源不建。
@@ -57,7 +57,7 @@
 | `IMG_RETRY_TIMES` / `IMG_RETRY_BASE_MS` | 2 / 800ms | 单图失败重试次数与退避基数（另加 0~400ms 抖动） |
 | `IMG_TOTAL_WAIT_MS` | 20000 | 单张图的总等待上限，跨所有重试共享；超时按失败结算并释放窗口位 |
 | `HOST_FAIL_THRESHOLD` | 3 | 同一图床连续硬失败这么多次即判不可达；超时不算，任一成功即清零 |
-| `PROGRESS_SHOW_DELAY_MS` / `PROGRESS_HIDE_DELAY_MS` | 300 / 2500ms | 进度提示出现与消失的延时 |
+| `PROGRESS_HIDE_DELAY_MS` | 2500ms | 全部结算后延迟这么久开始淡出（淡出 0.3s，再 0.4s 后移除） |
 | `REMOVE_SELECTORS` | 站内广告类名 | 命中即整块移除 |
 | `PRECONNECT_RETRY` | 25 | 预连接插入失败后的重试次数（4ms × 25 ≈ 100ms） |
 
@@ -81,7 +81,7 @@
 在官方镜像站上用真实 DOM + 真实图床注入运行：
 
 - **滑动窗口生效**：列表页 47 张缩略图的峰值在途为 **8**（等于 `MAX_IMG_IN_FLIGHT`），未开始的图 `src` 为空、浏览器不会去抓；完成数随时间递增并在结算后补位，最终 47/47、0 失败。
-- **加载进度**：`图片加载中 8/47` → `图片 47 张已加载`，2.5 秒后消失；详情页 9 张图同样正确结算后消失。
+- **加载状态**：`缩略图加载中 8/47` → `缩略图 47 张已加载`，2.5 秒后淡出；详情页 9 张图同样正确结算后消失。
 - **滚动不再触发任何加载**：脚本里已没有任何滚动监听或 `IntersectionObserver`。
 - **去广告**：列表页 `recs-*` 全清；详情页 `nav-container`（20 条赌场外链）与 `movie-banner` 全清，`.reward-card`（打赏功能卡）保留，`.r_two` 为 `display:none`。
 - **referrerPolicy 分布**：47 张跨域缩略图全部 `no-referrer`，同源图保持默认。
