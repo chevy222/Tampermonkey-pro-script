@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048缩略图
 // @namespace    https://fby.hfz300.com/
-// @version      4.0
+// @version      3.0
 // @description  打开页面即全量预加载全部图片：滑动窗口控制并发、失败自动重试与死图床熔断、右下角常驻加载进度。不监听滚动，滚动不触发任何加载。附带去广告、隐藏侧栏、图床 preconnect、跨域图 no-referrer、节点复用自动重试。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
