@@ -37,8 +37,9 @@
   // 从详情页回捞时单帖最多取几张图
   const MAX_DETAIL_IMGS = 5;
 
-  // 每个帖子最多注入几张缩略图。触屏模板每卡给 2 张，5 只是防御性封顶；
-  // 版式由 createThumbWrap 按实际张数计算，改这个值不需要同步改样式
+  // 每个帖子最多注入几张缩略图。触屏模板每卡给 2~3 张，5 只是防御性封顶；
+  // 版式由 createThumbWrap 按实际张数计算，改这个值不需要同步改样式。
+  // ⚠️ 必须 ≥ 1：设为 0 会让每行都插入一个没有图片的空容器，白留一段 margin
   const MAX_THUMBS_PER_POST = 5;
 
   // 移动版映射请求失败后的重试次数与退避间隔
@@ -75,6 +76,22 @@
   // 只统计硬失败，**超时不算**——超时是"慢"，把它算进来会把一次冷启动抖动放大成整个域名被判死。
   // 任意一次成功都会清零计数。
   const HOST_FAIL_THRESHOLD = 3;
+
+  // ============ 失败记忆 ============
+  // 成功图片不需要脚本操心：图床自带 Cache-Control: max-age=2592000（30 天），
+  // 刷新或重开页面都直接命中浏览器 HTTP 缓存，不会重新下载。
+  // 需要记住的是**失败**：站点里确实存在已失效的图床（qpic.ws、imgpile.com）和已删除的附件，
+  // 它们每次都要把"重试 + 等待预算"走满才被移除，刷新一次就重来一次。
+  // 下面两项把失败结论存进 localStorage，TTL 之内直接跳过：不再发请求，也不再占用发送窗口。
+  // 图床文件名带内容哈希，图片被替换后地址也会变，所以"跳过旧地址"不会误伤修复后的图。
+  // TTL 取得保守：超时只是"慢"的弱证据，记住太久会让一次网络抖动变成长时间的缺图，
+  // 所以宁可让用户多刷新一次，也不要把好图误伤。
+  const BAD_IMAGE_KEY = 'sehuaBadImages';
+  const BAD_IMAGE_TTL = 15 * 60 * 1000;    // 单张失败图的记忆时长
+  const BAD_IMAGE_MAX = 300;
+  const DEAD_HOST_KEY = 'sehuaDeadHosts';
+  const DEAD_HOST_TTL = 10 * 60 * 1000;    // 失效图床的记忆时长（判死影响面更大，所以更短）
+  const DEAD_HOST_MAX = 16;
 
   // 同时在途的缩略图请求数上限（0 = 不限制）。
   // 一页 60 张全部压给同一个图床，会把浏览器与代理的连接池排成 60 层队列：任何一张卡住都会
@@ -341,6 +358,7 @@
   // 挂一条 preconnect。document-start 时 <head>/<html> 可能都还没建立，短暂重试即可
   function preconnectHost(origin, tries = 0) {
     if (!origin || origin === location.origin) return;
+    if (deadHosts.has(origin)) return;   // 失败记忆里已判定不可达，就别再白握手一次
     const parent = document.head || document.documentElement;
     if (!parent) {
       if (tries < 10) setTimeout(() => preconnectHost(origin, tries + 1), 20);
@@ -551,6 +569,73 @@
   const hostFailStreak = new Map();
   const deadHosts = new Set();
 
+  // 失败记忆：见 BAD_IMAGE_KEY 处的说明
+  const badImages = new Set();
+  const badImageStamps = {};
+  const deadHostStamps = {};
+
+  // 读一张"名称 -> 时间戳"表，顺手清掉过期项
+  function readStampTable(key, ttl) {
+    let raw = {};
+    try { raw = JSON.parse(localStorage.getItem(key) || '{}'); } catch (e) { return {}; }
+    const now = Date.now();
+    const out = {};
+    let pruned = false;
+    for (const k of Object.keys(raw)) {
+      const t = raw[k];
+      if (!k || typeof t !== 'number' || now - t > ttl) { pruned = true; continue; }
+      out[k] = t;
+    }
+    if (pruned) writeStampTable(key, out);
+    return out;
+  }
+
+  function writeStampTable(key, table) {
+    try { localStorage.setItem(key, JSON.stringify(table)); } catch (e) {}
+  }
+
+  // 超过上限时丢掉最早的一条，并同步内存集合
+  function trimStamps(stamps, set, max, key) {
+    const keys = Object.keys(stamps);
+    if (keys.length > max) {
+      keys.sort((a, b) => stamps[a] - stamps[b])
+        .slice(0, keys.length - max)
+        .forEach(k => { delete stamps[k]; set.delete(k); });
+    }
+    writeStampTable(key, stamps);
+  }
+
+  function rememberBadImage(url) {
+    badImageStamps[url] = Date.now();
+    badImages.add(url);
+    trimStamps(badImageStamps, badImages, BAD_IMAGE_MAX, BAD_IMAGE_KEY);
+  }
+
+  // 图床恢复可用（该域名有图加载成功）时立刻忘掉它，别让失效记录一直生效
+  function forgetHost(origin) {
+    if (!deadHosts.has(origin)) return;
+    deadHosts.delete(origin);
+    delete deadHostStamps[origin];
+    writeStampTable(DEAD_HOST_KEY, deadHostStamps);
+  }
+
+  function rememberDeadHost(origin) {
+    deadHostStamps[origin] = Date.now();
+    deadHosts.add(origin);
+    trimStamps(deadHostStamps, deadHosts, DEAD_HOST_MAX, DEAD_HOST_KEY);
+  }
+
+  // 启动时把 TTL 内的失败记录读回来
+  function loadFailureMemory() {
+    const bad = readStampTable(BAD_IMAGE_KEY, BAD_IMAGE_TTL);
+    Object.assign(badImageStamps, bad);
+    Object.keys(bad).forEach(k => badImages.add(k));
+
+    const hosts = readStampTable(DEAD_HOST_KEY, DEAD_HOST_TTL);
+    Object.assign(deadHostStamps, hosts);
+    Object.keys(hosts).forEach(k => deadHosts.add(k));
+  }
+
   function imageOrigin(url) {
     try { return new URL(url, location.origin).origin; } catch (e) { return null; }
   }
@@ -559,15 +644,18 @@
   // 超时不上报，见 HOST_FAIL_THRESHOLD 的说明
   function trackHostResult(origin, outcome) {
     if (!origin) return;
-    if (outcome === 'ok') { hostFailStreak.delete(origin); return; }
+    if (outcome === 'ok') {
+      hostFailStreak.delete(origin);
+      forgetHost(origin);
+      return;
+    }
     const streak = (hostFailStreak.get(origin) || 0) + 1;
     hostFailStreak.set(origin, streak);
-    if (streak >= HOST_FAIL_THRESHOLD) deadHosts.add(origin);
+    if (streak >= HOST_FAIL_THRESHOLD) rememberDeadHost(origin);
   }
 
   function pumpImgQueue() {
     while (imgQueue.length > 0 && (MAX_IMG_IN_FLIGHT <= 0 || imgInFlight < MAX_IMG_IN_FLIGHT)) {
-      imgInFlight++;
       imgQueue.shift()();
     }
   }
@@ -586,7 +674,7 @@
   // 失败分两类：硬失败（浏览器派发 error）计入图床健康度；超时（预算耗尽）不计入。
   function loadThumb(img, url, anchor, wrap) {
     const origin = imageOrigin(url);
-    const startedAt = performance.now();
+    let startedAt = 0;           // 等待预算的起点，见队列任务里的说明
     let attempt = 0;
     let settled = false;
     let holding = false;
@@ -604,7 +692,16 @@
       settled = true;
       clearTimeout(timer);
       releaseSlot();
-      if (outcome === 'ok' || outcome === 'hard') trackHostResult(origin, outcome);
+
+      // 失败记忆与图床熔断是**两件事**，判据不同：
+      //   · 硬失败与超时都写进失败记忆（TTL 内不再请求），这样刷新页面不会把已知失败的图重试一遍；
+      //   · 只有硬失败才喂给图床熔断 —— 超时只是"慢"的弱证据，喂进去会重演
+      //     "一次冷启动抖动把整个域名判死"的老问题。
+      // outcome === 'skip'（命中失败记忆或图床已判死）已经记过了，不必再记。
+      if (!failed) trackHostResult(origin, 'ok');
+      else if (outcome === 'hard') { rememberBadImage(url); trackHostResult(origin, 'hard'); }
+      else if (outcome === 'timeout') rememberBadImage(url);
+
       thumbProgress.settle(failed);
       if (failed) {
         anchor.remove();
@@ -612,26 +709,35 @@
       }
     };
 
-    // 把下一次尝试排进队列（队尾），拿到窗口位后才真正发请求
-    const queueAttempt = () => {
-      if (settled) return;
-      imgQueue.push(() => {
+// 把下一次尝试排进队列（队尾），拿到窗口位后才真正发请求。
+  // 注意：窗口位是在**任务内部**才递增的。若像以前那样在出队前先递增，
+  // 一个"排队期间已经 settled"的任务会直接 return，那一次递增就永远还不回去，
+  // 累积到 MAX_IMG_IN_FLIGHT 次之后整个窗口彻底卡死、再也没有图片能开始加载。
+  const queueAttempt = () => {
+    if (settled) return;
+imgQueue.push(() => {
         if (settled) return;
+        imgInFlight++;
         holding = true;
-        if (deadHosts.has(origin)) { done(true, 'slow'); return; }
-        img.src = attempt === 0 ? url : url + (url.indexOf('?') === -1 ? '?' : '&') + '_r=' + attempt;
-        // 命中缓存时不会再派发 load / error，必须自己结算一次。
-        // 缓存里的失败结果一律按"超时"处理、不上报图床健康度：它失败得极快、不占预算，
-        // 熔断对它没有价值，只会在图床短暂不可用后误伤整批图。
-        if (img.complete) {
-          const ok = img.naturalWidth > 0;
-          done(!ok, ok ? 'ok' : 'slow');
-          return;
-        }
-        armWait();
-      });
-      pumpImgQueue();
-    };
+        // 等待预算从**真正发起第一次请求**时起算，而不是从"图片被创建"时起算。
+        // 同一页几十张图是同一批注入的，只有 MAX_IMG_IN_FLIGHT 张能真正开始；后面那些要排队。
+        // 若把排队时间算进预算，图床一慢，队尾的图拿到手的剩余预算就是 0，
+        // 会在毫秒内被判超时、连一次完整尝试都没做完就被放弃（实测可让整页 56 张图丢在排队阶段）。
+        if (attempt === 0) startedAt = performance.now();
+        if (deadHosts.has(origin)) { done(true, 'skip'); return; }
+      img.src = attempt === 0 ? url : url + (url.indexOf('?') === -1 ? '?' : '&') + '_r=' + attempt;
+      // 命中缓存时不会再派发 load / error，必须自己结算一次。
+      // 缓存里的失败结果同样算硬失败：它说明这个地址确实取不到，值得写进失败记忆；
+      // 但它失败得极快、不占预算，喂给熔断没有价值，所以只记图、不动图床计数。
+      if (img.complete) {
+        const ok = img.naturalWidth > 0;
+        done(!ok, ok ? 'ok' : 'hard');
+        return;
+      }
+      armWait();
+    });
+    pumpImgQueue();
+  };
 
     const armWait = () => {
       clearTimeout(timer);
@@ -649,7 +755,7 @@
     function onTimeout() {
       if (settled) return;
       clearTimeout(timer);
-      if (attempt >= IMG_RETRY_TIMES) { done(true, 'slow'); return; }
+      if (attempt >= IMG_RETRY_TIMES) { done(true, 'timeout'); return; }
       retryLater();
     }
 
@@ -664,6 +770,8 @@
     img.addEventListener('error', onError);
 
     thumbProgress.add(1);
+    // 失败记忆命中：TTL 内已知这张图/这个图床不行，直接跳过——不发请求，也不占用发送窗口
+    if (badImages.has(url) || deadHosts.has(origin)) { done(true, 'skip'); return; }
     queueAttempt();
   }
 
@@ -1053,6 +1161,7 @@
   const earlyPageInfo = getPageInfo();
   let earlyListFetch = null;
 
+  loadFailureMemory();
   preconnectLearnedHosts();
 
   if (earlyPageInfo.fid) {
