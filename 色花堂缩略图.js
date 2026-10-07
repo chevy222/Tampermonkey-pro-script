@@ -45,6 +45,16 @@
   const MOBILE_RETRY_TIMES = 2;
   const MOBILE_RETRY_DELAY = 1500;
 
+  // 预取下一页的移动版映射。
+  // 映射请求（约 184KB）是每页唯一的大块固定等待：它到达之前，一张缩略图都不能开始请求。
+  // "下一页"已被还原成整页跳转，所以完全可以在用户读当前页时把下一页的映射先准备好，
+  // 翻过去时缩略图在 DOM 就绪那一刻就能开始请求。代价是每页多约 184KB（约为整页图片量的 1.4%）。
+  // 预取用 allowRetry=false：失败不缓存也不重试，真正翻到那一页时自会走带重试的正常流程。
+  const PREFETCH_NEXT_PAGE = true;
+
+  // 预取延后多久发出：等当前页的图片请求已经铺开后再发，避免与首波图片抢站点连接
+  const PREFETCH_DELAY_MS = 3000;
+
   // 详情页请求被反爬拦截后的退避重试：间隔 = 基数 + 第几次 x 基数（2s / 4s）
   const DETAIL_RETRY_TIMES = 3;
   const DETAIL_RETRY_BASE_MS = 2000;
@@ -310,6 +320,14 @@
       .finally(() => { delete pendingPages[key]; });
     pendingPages[key] = fetchPromise;
     return fetchPromise;
+  }
+
+  // 预取下一页的映射（见 PREFETCH_NEXT_PAGE 处的说明）
+  function prefetchNextPageMapping(fid, page) {
+    if (!PREFETCH_NEXT_PAGE) return;
+    setTimeout(() => {
+      fetchMobileThumbsByPage(fid, page + 1, false).catch(() => {});
+    }, PREFETCH_DELAY_MS);
   }
 
   // ============ 缩略图图床的预连接 ============
@@ -1016,6 +1034,7 @@
 
     preconnectImageHosts(mapping);
     processTable(mapping);
+    prefetchNextPageMapping(fid, page);
 
     if (fallbackTids.length > 0) {
       const fallbackBatch = Array.from(document.querySelectorAll('#threadlisttableid tbody[id^=normalthread_]'))
