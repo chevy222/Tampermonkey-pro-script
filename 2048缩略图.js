@@ -118,6 +118,7 @@
     /* ============================== 加载状态 ============================== */
 
     var badge = null;
+    var badgeClosed = false;
     var hideTimer = null;
     var removeTimer = null;
 
@@ -126,7 +127,7 @@
     var failedCount = 0;     // 其中放弃的
 
     function renderProgress() {
-        if (!totalCount) return;
+        if (badgeClosed || !totalCount) return;
         if (!badge || !badge.isConnected) {
             var parent = document.body || document.documentElement;
             if (!parent) return;
@@ -158,6 +159,9 @@
             removeTimer = setTimeout(function () {
                 removeTimer = null;
                 if (badge) badge.remove();
+                // 收尾过一次就不再唤起：否则用户点"大图"（详情页 .pimg 会给 .big_img 写新地址、
+                // 重新登记一张）会让状态条在几分钟后又弹出来
+                badgeClosed = true;
             }, 400);
         }, PROGRESS_HIDE_DELAY_MS);
     }
@@ -377,6 +381,8 @@
         clearTimeout(img._timer);
         img._timer = null;
         if (img._state === 'inflight' && inFlight > 0) inFlight--;
+        // 退避中的图被换掉：定时器已被清掉，计数必须在这里还回去，否则 backoff 永远回不到 0
+        if (img._state === 'backoff' && backoff > 0) backoff--;
         var i = pending.indexOf(img);
         if (i > -1) pending.splice(i, 1);
         if (img._state === 'settled') {
@@ -412,8 +418,6 @@
 
     function processAdded(node) {
         if (node.nodeType !== 1) return;
-        // IMG 只走图片登记：它不可能命中广告选择器，不必再走一遍 removeMatching
-        if (node.tagName === 'IMG') { pickImage(node); return; }
         sweep(node);
         removeMatching(node);
     }
@@ -446,7 +450,14 @@
                 continue;
             }
             var nodes = mutation.addedNodes;
-            for (var i = 0; i < nodes.length; i++) pendingNodes.push(nodes[i]);
+            for (var i = 0; i < nodes.length; i++) {
+                var node = nodes[i];
+                // 单个 IMG 的登记是 O(1)，就地做掉、不进 50ms 批量：
+                // 摘 src 必须赶在浏览器自己发起原生 lazy 请求之前（实测放进批量里会有约 20/47 张被抢先，
+                // 那些图先按原地址发一次、之后又按窗口发的地址再发一次）。其余节点仍走批量，避免遍历放大
+                if (node.nodeType === 1 && node.tagName === 'IMG') pickImage(node);
+                else pendingNodes.push(node);
+            }
         }
         if (pendingNodes.length || pendingAttrs.length) scheduleFlush();
     });
