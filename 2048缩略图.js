@@ -164,7 +164,8 @@
 
     /* ============================== 加载调度 ============================== */
 
-    // pending 等待窗口位 / inflight 已发请求未结算 / backoff 失败等待重试
+    // pending 等待窗口位 / inflight 已发请求未结算 / idle 已释放窗口位待转换 /
+    // backoff 失败等待重试 / settled 已结算（成功或放弃）
     var pending = [];
     var inFlight = 0;
     var backoff = 0;
@@ -231,13 +232,15 @@
         renderProgress();
     }
 
-    // isHard：浏览器派发的 error（DNS / 连接被拒 / HTTP 错误），计入图床健康度；
-    // 超时传 false，不参与判定
+    // isHard：浏览器派发的 error（DNS 失败 / 连接被拒 / HTTP 错误），计入图床健康度；
+    // 超时传 false，不参与判定。
+    // 只在第一次失败时计数：同一张图自己的重试不再累加，否则一张坏图（本页 46/47 张图同域）
+    // 重试 3 次就够把整个域名判死、连带丢掉所有还在排队的图
     function failImg(img, isHard) {
         if (img._state === 'settled') return;
         var host = img._host;
         releaseSlot(img);
-        if (isHard) {
+        if (isHard && img._tries === 0) {
             var n = (hostFails[host] || 0) + 1;
             hostFails[host] = n;
             if (n >= HOST_FAIL_THRESHOLD) {
@@ -303,7 +306,6 @@
         }
         img.classList.remove('lazy-failed');
         img._tries = 0;
-        img.referrerPolicy = 'no-referrer';
         // 用户明确要求重试，把该图床的熔断计数清掉，否则图床已被判死时这次点击会被立刻放弃
         hostFails[img._host] = 0;
         img._state = 'queued';
@@ -410,8 +412,9 @@
 
     function processAdded(node) {
         if (node.nodeType !== 1) return;
-        if (node.tagName === 'IMG') pickImage(node);
-        else sweep(node);
+        // IMG 只走图片登记：它不可能命中广告选择器，不必再走一遍 removeMatching
+        if (node.tagName === 'IMG') { pickImage(node); return; }
+        sweep(node);
         removeMatching(node);
     }
 
