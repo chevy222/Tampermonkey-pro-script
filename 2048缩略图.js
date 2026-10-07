@@ -16,9 +16,9 @@
     /* ============================== 可调参数 ============================== */
 
     // 同时在途的图片请求数上限；每张结算（成功或放弃）后立刻补下一张。
-    // 页内几十张图通常来自同一个图床，图床对单客户端限速、也会限制突发并发
-    // （实测一次 6 并发突发会被整批拒掉），一次性全放出去只会互相排队。
-    // 窗口位按次持有：重试的图重新排到队尾，慢图不会一直占着位子
+    // 图床对单客户端限速且吞吐波动很大（实测同一批冷请求两次跑相差最多 1.6 倍），限住在飞数的
+    // 收益是"靠前的图先完成"而不是总耗时。4 ~ 16 之间的差别被图床自身波动淹没，8 取的是保守值；
+    // 突发并发（一次几十张）实测反而更慢
     var MAX_IMG_IN_FLIGHT = 8;
 
     // 单图失败重试次数与退避基数（另加 0~400ms 抖动）
@@ -26,7 +26,7 @@
     var IMG_RETRY_BASE_MS = 800;
 
     // 单张图的总等待上限，跨所有重试共享；超时按失败结算并释放窗口位。
-    // 不能调太小：经代理时一次冷连接实测就要 10 秒以上
+    // 只是兜底：实测单张冷启动（含 TCP+TLS ≈ 340ms）约 0.9 秒
     var IMG_TOTAL_WAIT_MS = 20000;
 
     // 同一图床连续硬失败（浏览器派发 error：DNS 失败 / 连接被拒 / HTTP 错误）这么多次即判不可达，
@@ -80,7 +80,8 @@
     var preconnectedHosts = {};
 
     // 只返回需要预连接的跨域 origin：同源不建；https 页面里的 http 源不建
-    // （按混合内容规则它最终不会走 http，预连接只会白建一条连接）
+    // （按混合内容规则它最终不会走 http，预连接只会白建一条连接）。
+    // 图床域名轮换很频繁，出现 http-only 域名的可能是真实的，这条不是死分支
     function crossOriginOf(url) {
         try {
             var u = new URL(url, location.href);
@@ -266,11 +267,14 @@
         }
     }
 
-    // 没有排队、没有在飞、没有退避中的图，就是全部结算完了
+    // 没有排队、没有在飞、没有退避中的图，就是全部结算完了。
+    // 兜底：真出现缺口（站点中途把某张已登记的图改成同源地址或清掉 src）时按失败结算，
+    // 不让状态永远停在"加载中"——当前站点行为下不会走到这里
     function checkDone() {
-        if (!totalCount) return;
-        if (pending.length || inFlight || backoff) return;
-        if (finishedCount < totalCount) finishedCount = totalCount;   // 站点中途清掉某张图 src 时的自愈
+        if (!totalCount || pending.length || inFlight || backoff) return;
+        if (finishedCount >= totalCount) return;
+        failedCount += totalCount - finishedCount;
+        finishedCount = totalCount;
         renderProgress();
     }
 
@@ -310,7 +314,9 @@
     /* ============================== 图片登记 ============================== */
 
     // 只接管跨域图片（图床）；站内图标、相对路径装饰图、空 src 一律不碰。
-    // 空 src 不标记 _picked：站点稍后才会写进去（例如详情页的 .big_img），等 src 变了再登记
+    // 空 src 不标记 _picked：站点稍后才会写进去（例如详情页的 .big_img），等 src 变了再登记。
+    // data: 内联图必须在这里挡掉：new URL 会给出 origin "null"，会把 no-referrer 和一条
+    // href="null" 的无效 preconnect 打到它身上（页面实测有 1 张 data: 图）
     function pickImage(img) {
         if (!img || img.tagName !== 'IMG' || img._picked) return;
         var src = img.getAttribute('src') || '';
@@ -329,10 +335,9 @@
         watchImg(img);
         if (!img._counted) { img._counted = true; totalCount++; renderProgress(); }
 
-        // 已经抓完的图（命中缓存、或站点在脚本接管前就把请求发出去了）：直接结算，不再重发
+        // 已经抓完的图（命中缓存、或站点在脚本接管前就把请求发出去了）：直接结算，不再重发。
+        // succeed 对没占窗口位的图不会去减计数，所以这里不必先假占一个位
         if (img.complete && img.naturalWidth > 0) {
-            img._state = 'inflight';
-            inFlight++;
             succeed(img);
             return;
         }
@@ -388,16 +393,15 @@
     var pendingAttrs = [];
     var debounceTimer = null;
 
+    // root 只有两种来源：MutationObserver 送来的新增元素(1)，或 DOM 就绪后的全量扫描传的 document(9)
     function removeMatching(root) {
-        // 入参可能是 document(9)：DOMContentLoaded 全量扫描传它；
-        // 也可能是 DocumentFragment(11) 或 MutationObserver 送来的元素(1)，三者都要放行
         if (!root) return;
         if (root.nodeType === 1) {
             var isRootEl = (root === document.body || root === document.documentElement);
             if (!isRootEl && root.matches(REMOVE_SELECTOR)) { root.remove(); return; }
             // 叶子节点不可能包含广告后代，直接早退（解析期绝大多数新增节点是叶子）
             if (!isRootEl && !root.firstElementChild) return;
-        } else if (root.nodeType !== 9 && root.nodeType !== 11) {
+        } else if (root.nodeType !== 9) {
             return;   // 文本 / 注释等
         }
         var els = root.querySelectorAll(REMOVE_SELECTOR);
