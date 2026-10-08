@@ -171,8 +171,24 @@ PC 列表页本身**没有缩略图**，脚本改成"从移动版模板取图，
 3. **图床强制校验 Referer**：缩略图 `<img>` **绝不能**加 `referrerPolicy="no-referrer"`（会 403）。
 4. **图床只提供原图，服务端侧没有任何缩放或再压缩的余地**。逐一实测过：`?w=` / `?width=` / `?imageView2` / `?x-oss-process` 等查询参数被忽略；`/cdn-cgi/image/` 返回 404；`{name}.jpg.thumb.jpg`、`{name}_thumb.jpg`、`thumb/{name}.jpg`、`small/…`、`normal_{name}.jpg` 等 8 种路径变体全部 404；站点自身的 `data/attachment/forum/…` 与 `.thumb.jpg` 也都是 404 —— 也就是说论坛与图床两边都没有小图。Cloudflare Polish 会自动转码（`Vary: accept`），但实测对同一张图 WebP 反而比 JPEG 大 7%（163,881 → 175,918 字节），脚本无法干预 `<img>` 的 `Accept`。
 5. **单页真实体积约 13MB，且被少数动图主导**。实测某页 59 张缩略图合计 **13.3MB**（均值 237KB/张），其中 **2 张动图就占 5.6MB（42%）**，其余 57 张均值 135KB。解码后的位图内存更夸张：1916×1092×4B ≈ 8.4MB/张 × 59 ≈ **470MB**（`decoding="async"` 只解决主线程阻塞，不解决内存）。**唯一能降体积的旋钮是 `MAX_THUMBS_PER_POST`** —— 改成 1 可把 13.3MB 降到约 6.6MB，代价是版式从"两张各 40%"变成"一张 50%"。
-6. **浏览器首次连图床要 25 秒以上**（2026-10-08 实测）。图床是 Cloudflare 且宣告 `alt-svc: h3` —— Chrome 先试 QUIC（UDP），经代理被挡住后要等握手超时才回落 TCP；同一时刻 `curl` 只要 0.86 秒 TTFB。而且 `CF-Ray` 显示走的是法兰克福节点。**连接一旦建立就极快**：8 并发 291ms、16 并发 708ms、32 并发 799ms 整批完成；新开文档里首次冷请求只要 896ms（连接被复用）。所以：**这 25 秒是每次浏览器会话付一次的固定成本，不是每页都付**，脚本能做的是在 `document-start` 就 preconnect（把起点提前到约 0.1 秒）。
+6. **浏览器走 QUIC 连图床会持续失败，这是最大的性能杀手**（2026-10-08 实测）。图床是 Cloudflare 且宣告 `alt-svc: h3` —— Chrome 先试 QUIC（UDP），经代理被挡住后要等握手超时才回落 TCP；同一时刻 `curl` 只要 0.86 秒 TTFB。而且 `CF-Ray` 显示走的是法兰克福节点。**连接一旦建立就极快**：8 并发 291ms、16 并发 708ms、32 并发 799ms 整批完成；新开文档里首次冷请求只要 896ms（连接被复用）。所以：**这 25 秒是每次浏览器会话付一次的固定成本，不是每页都付**，脚本能做的是在 `document-start` 就 preconnect（把起点提前到约 0.1 秒）。
    注意：这条直接决定 `IMG_TOTAL_WAIT_MS` 的下限 —— 30 秒曾把它压在冷连接时间上，实测一次加载 60 张里有 29 张被判超时、进而被写进失败记忆、接下来 5 分钟被直接跳过。现已提到 45 秒，并把超时记忆缩短到 60 秒。
+
+   2026-10-08 晚进一步拿到错误名（`bsk console`）：
+
+   ```
+   47 × net::ERR_QUIC_PROTOCOL_ERROR     ← Chrome 一直在试 QUIC，全被代理搞坏
+   18 × net::ERR_NAME_NOT_RESOLVED       ← DNS 解析也间歇失败
+   ```
+
+   对照实验很干净：**站点 `bhagq.4yl7j.com` 不宣告 h3 → responseEnd 665~724ms 一直很快；图床宣告 h3 → 单张 12~57 秒**。第 101 页实测 50 秒只结算 4/59 张，flush socket pools 也救不回来。
+
+   **修法（都在浏览器/代理侧，脚本无能为力）**：
+   1. `chrome://flags/#enable-quic` → **Disabled**（最直接）；或在代理客户端把 **UDP 443 直接拒绝**（回 ICMP unreachable 而不是静默丢弃），Chrome 会立刻回落 TCP。
+   2. 顺手关掉 Chrome 的「使用安全 DNS」（`chrome://settings/security`）—— 经代理时 DoH 很容易解析失败，对应那 18 条 `ERR_NAME_NOT_RESOLVED`。
+   3. 改完 flush socket pools + 刷新。
+
+   > 附：这次也验证了 v3.2 的隔离设计是对的 —— 47 次 QUIC 失败全部落到「慢图记忆」60 秒表，`sehuaBadImages` 0 条、图床熔断未触发；换作旧版就是 47 条 5 分钟坏图记录 + 整个域名被判死。
 7. **图床域名不固定，且存在已经死掉的域名**。列表页实测单域名（`tu.djhdhs.us`），搜索结果页的图来自各帖详情页，除该域名外还会出现 `imgpile.com`、`qpic.ws` 等；实测 `qpic.ws` 已完全连不通（`ERR_CONNECTION_TIMED_OUT`），会白耗一轮重试。脚本对详情页取到的地址同样做预连接与域名学习（`preconnectUrlList`），并对连续失败的域名熔断（`HOST_FAIL_THRESHOLD`）。
 8. **置顶帖在移动版是纯文字列表**，其卡片没有 `a[href*=viewthread]`，会被解析逻辑跳过 → PC 列表的置顶行不注入缩略图，与移动版展示一致。
 9. **分页按钮会被还原成普通链接**。站点用 `static/js/autoloadpage.js` 接管 `#autopbn` 的点击、用 Ajax 往表格里追加下一页的 tbody；而该文件里 `autopagenum` 恒为 0，滚动到底本来也不会自动追加。被 Ajax 追加的行拿不到移动版映射，只会得到一整页无缩略图的行，所以脚本把 `#autopbn` 的 `onclick` 摘掉、`href` 还原成下一页地址：点击即整页跳转，走与首页一致的流程。这套机制只存在于论坛列表页；搜索结果页用的是普通 `.pg` 链接、没有 `#autopbn`，所以搜索页不调用它。
