@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂缩略图
 // @namespace    http://98tang.com/
-// @version      3.1
+// @version      3.2
 // @description  PC列表页从移动版触屏模板取缩略图，页面打开时一次性全部加载（无懒加载、无滚动触发、无按需加载），宽屏单列布局 + 加载进度提示 + 失败自动重试；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -18,7 +18,7 @@
 
   // 版本号，与头部 @version 保持一致。运行时写到 <html data-sehua="..."> 上，
   // 用于随时确认浏览器里实际加载的是哪一版（改了文件但没重新导入时一眼可见）
-  const VERSION = '3.1';
+  const VERSION = '3.2';
 
   // 服务端只凭请求头 User-Agent 分发模板，这是整个缩略图方案成立的唯一开关。
   // 不能用"浏览器伪装 UA 直接访问"代替：触屏模板自带的 JS 会用 "ontouchend" in document 判定后
@@ -67,9 +67,11 @@
   // 单张图片的总等待上限，跨所有重试共享这一个预算。
   // 快失败（DNS 失败、连接被拒、404）几乎不占预算，重试照常生效；
   // 而图床无响应时最多耗掉这一个预算就放弃，不会因为重试次数把一张死图拖成好几份超时。
-  // 值不能太小：经代理访问图床时，一次冷连接（DNS+TCP+TLS）就要 10 秒以上，
-  // 十几张图同时冷启动时更久，阈值过低会把"慢"误判成"死"。
-  const IMG_TOTAL_WAIT_MS = 30000;
+  // 值不能太小：实测（2026-10-08）浏览器**首次**连该图床要 25 秒以上 —— 图床宣告
+  // alt-svc: h3，Chrome 先试 QUIC，被代理挡住后要等握手超时才回落 TCP，而 curl 同一
+  // 时刻只要 0.86s。连接一旦建立，32 并发整批只要 799ms。预算若压在这个冷连接时间附近，
+  // 一次慢启动就会把整页图判成超时（实测 60 张里 29 张被这样丢掉）。
+  const IMG_TOTAL_WAIT_MS = 45000;
 
   // 同一图床的**硬失败**（浏览器派发了 error 事件：DNS 失败、连接被拒、HTTP 错误）连续达到此次数，
   // 即判定该域名不可达，此后该域名尚未开始的图片直接判失败。
@@ -90,6 +92,13 @@
   const BAD_IMAGE_KEY = 'sehuaBadImages';
   const BAD_IMAGE_TTL = 5 * 60 * 1000;     // 单张失败图的记忆时长
   const BAD_IMAGE_MAX = 300;
+  // 超时是"弱证据"，单独一张表 + 短 TTL。
+  // 实测教训：浏览器首次连图床要 25 秒以上，预算没压住时整页图会被判成超时；若再用
+  // 5 分钟去记这些超时，一次慢启动就会让整页图在接下来 5 分钟里被直接跳过 ——
+  // 用户看到的是"图怎么没了"。60 秒只够挡住"刷新后立刻再试一遍"，不至于长时间缺图。
+  const SLOW_IMAGE_KEY = 'sehuaSlowImages';
+  const SLOW_IMAGE_TTL = 60 * 1000;
+  const SLOW_IMAGE_MAX = 300;
   const DEAD_HOST_KEY = 'sehuaDeadHosts';
   const DEAD_HOST_TTL = 10 * 60 * 1000;    // 失效图床的记忆时长（判死影响面更大，所以更短）
   const DEAD_HOST_MAX = 16;
@@ -584,6 +593,8 @@
   // 失败记忆：见 BAD_IMAGE_KEY 处的说明
   const badImages = new Set();
   const badImageStamps = {};
+  const slowImages = new Set();
+  const slowImageStamps = {};
   const deadHostStamps = {};
 
   // 读一张"名称 -> 时间戳"表，顺手清掉过期项
@@ -617,7 +628,14 @@
     writeStampTable(key, stamps);
   }
 
-  function rememberBadImage(url) {
+  // soft=true 表示只是"超时/慢"，用短 TTL 的表；否则按硬失败记 5 分钟
+  function rememberBadImage(url, soft) {
+    if (soft) {
+      slowImageStamps[url] = Date.now();
+      slowImages.add(url);
+      trimStamps(slowImageStamps, slowImages, SLOW_IMAGE_MAX, SLOW_IMAGE_KEY);
+      return;
+    }
     badImageStamps[url] = Date.now();
     badImages.add(url);
     trimStamps(badImageStamps, badImages, BAD_IMAGE_MAX, BAD_IMAGE_KEY);
@@ -656,6 +674,10 @@
     const hosts = readStampTable(DEAD_HOST_KEY, DEAD_HOST_TTL);
     Object.assign(deadHostStamps, hosts);
     Object.keys(hosts).forEach(k => deadHosts.add(k));
+
+    const slow = readStampTable(SLOW_IMAGE_KEY, SLOW_IMAGE_TTL);
+    Object.assign(slowImageStamps, slow);
+    Object.keys(slow).forEach(k => slowImages.add(k));
   }
 
   function imageOrigin(url) {
@@ -722,7 +744,7 @@
       // outcome === 'skip'（命中失败记忆或图床已判死）已经记过了，不必再记。
       if (!failed) trackHostResult(origin, 'ok');
       else if (outcome === 'hard') { rememberBadImage(url); trackHostResult(origin, 'hard'); }
-      else if (outcome === 'timeout') rememberBadImage(url);
+      else if (outcome === 'timeout') rememberBadImage(url, true);   // 超时只短暂记住
       else if (outcome === 'cached-hard') rememberBadImage(url);   // 只记图，不喂熔断
 
       thumbProgress.settle(failed);
@@ -796,7 +818,7 @@ imgQueue.push(() => {
 
     thumbProgress.add(1);
     // 失败记忆命中：TTL 内已知这张图/这个图床不行，直接跳过——不发请求，也不占用发送窗口
-    if (badImages.has(url) || deadHosts.has(origin)) { done(true, 'skip'); return; }
+    if (badImages.has(url) || slowImages.has(url) || deadHosts.has(origin)) { done(true, 'skip'); return; }
     queueAttempt();
   }
 
