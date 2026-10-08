@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048缩略图
 // @namespace    https://fby.hfz300.com/
-// @version      3.0
+// @version      3.1
 // @description  打开页面即全量预加载全部图片：滑动窗口控制并发、失败自动重试与死图床熔断、右下角常驻加载进度。不监听滚动，滚动不触发任何加载。附带去广告、隐藏侧栏、图床 preconnect、跨域图 no-referrer、节点复用自动重试。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
@@ -238,16 +238,17 @@
 
     // isHard：浏览器派发的 error（DNS 失败 / 连接被拒 / HTTP 错误），计入图床健康度；
     // 超时传 false，不参与判定。
-    // 只在第一次失败时计数：同一张图自己的重试不再累加，否则一张坏图（本页 46/47 张图同域）
-    // 重试 3 次就够把整个域名判死、连带丢掉所有还在排队的图
+    // 计数按"图"而不是按"次"：同一张图自己的重试不再累加，否则一张坏图（本页 46/47 张图同域）
+    // 重试 3 次就够把整个域名判死、连带丢掉所有还在排队的图。
+    // 阈值则每次硬失败都判：熔断触发时，还在退避等待中的同域图下一次失败就立刻放弃，
+    // 不会再把剩下的重试次数白耗完
     function failImg(img, isHard) {
         if (img._state === 'settled') return;
         var host = img._host;
         releaseSlot(img);
-        if (isHard && img._tries === 0) {
-            var n = (hostFails[host] || 0) + 1;
-            hostFails[host] = n;
-            if (n >= HOST_FAIL_THRESHOLD) {
+        if (isHard) {
+            if (img._tries === 0) hostFails[host] = (hostFails[host] || 0) + 1;
+            if (hostFails[host] >= HOST_FAIL_THRESHOLD) {
                 dropHost(host);
                 giveUp(img);
                 pump();
@@ -359,8 +360,10 @@
             pending.push(img);
             pump();
         } else {
-            // 服务端已给出可请求地址且没标 lazy：浏览器早就在下载，
-            // 这里只登记进度并挂上失败处理，占一个窗口位等它结算
+            // 服务端已给出可请求地址、没标 lazy：浏览器早就在下载了，这里撤不掉。
+            // 仍然占一个窗口位——注意这不是"绕过上限"，恰恰相反：这些请求已经在飞，
+            // 把它们计入 inFlight 是让计数更保守（详情页实测会到 17 个，占满窗口、
+            // pending 里没有图可发而已）。要真限流只能不给 src，那是另一套设计
             img._state = 'inflight';
             inFlight++;
             img._timer = setTimeout(function () { failImg(img, false); }, IMG_TOTAL_WAIT_MS);
@@ -479,10 +482,13 @@
 
     // 解析期已经由 MutationObserver 逐节点登记，DOM 就绪后再全量扫一遍，
     // 兜住极少数没走 addedNodes 分支的节点；同时补渲染一次状态，
-    // 让"图在解析结束前就全部结算完"的情况也能收敛到终态
+    // 让"图在解析结束前就全部结算完"的情况也能收敛到终态。
+    // checkDone 是最后一道收敛：resetImage 与"同源/内联图直接放行"这两条路都不会调用 pump，
+    // 真出现缺口时靠这里兜住（当前站点行为下走不到）
     function onDomReady() {
         sweep(document);
         removeMatching(document);
+        checkDone();
         renderProgress();
     }
 
