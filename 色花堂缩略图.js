@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂缩略图
 // @namespace    http://98tang.com/
-// @version      3.0
+// @version      3.1
 // @description  PC列表页从移动版触屏模板取缩略图，页面打开时一次性全部加载（无懒加载、无滚动触发、无按需加载），宽屏单列布局 + 加载进度提示 + 失败自动重试；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -18,7 +18,7 @@
 
   // 版本号，与头部 @version 保持一致。运行时写到 <html data-sehua="..."> 上，
   // 用于随时确认浏览器里实际加载的是哪一版（改了文件但没重新导入时一眼可见）
-  const VERSION = '3.0';
+  const VERSION = '3.1';
 
   // 服务端只凭请求头 User-Agent 分发模板，这是整个缩略图方案成立的唯一开关。
   // 不能用"浏览器伪装 UA 直接访问"代替：触屏模板自带的 JS 会用 "ontouchend" in document 判定后
@@ -386,7 +386,10 @@
     hosts.forEach(h => preconnectHost(h));
     try {
       const prev = JSON.parse(localStorage.getItem(IMG_HOST_KEY) || '[]');
-      localStorage.setItem(IMG_HOST_KEY, JSON.stringify([...new Set([...hosts, ...prev])].slice(0, IMG_HOST_MAX)));
+      // 已判不可达的域名不写进名单：IMG_HOST_MAX 只有 4 条，实测搜索页会同时产出
+      // qpic.ws / imgpile.com 两个死域名，它们一占位就会把健康域名挤出 document-start 预连接
+      const merged = [...new Set([...hosts, ...prev])].filter(h => !deadHosts.has(h));
+      localStorage.setItem(IMG_HOST_KEY, JSON.stringify(merged.slice(0, IMG_HOST_MAX)));
     } catch (e) {}
   }
 
@@ -433,7 +436,9 @@
               resolve(urls);
             } catch (e) {
               console.error('[色花堂缩略图] 详情页解析失败:', e);
-              resolve([]);
+              // 返回 null 而不是 []：[] 的含义是"这帖确实没图"，会被上层标记为已处理、
+              // 从此不再重试；解析异常属于偶发失败，必须走"可重试"的那条路
+              resolve(null);
             }
           },
           ontimeout: function() { resolve('blocked'); },
@@ -515,11 +520,17 @@
   // 全量加载时用户需要知道"还剩多少没出来"。计数由 createThumbWrap 注册、每张图的
   // 结算（成功/最终失败）回报一次；全部结算后延迟消失，期间若又有新图注册则推迟。
   const thumbProgress = {
-    total: 0, settled: 0, failed: 0, el: null, timer: null,
+    total: 0, settled: 0, failed: 0, el: null, timer: null, removeTimer: null,
 
     add(count) {
       this.total += count;
       clearTimeout(this.timer);
+      // 必须连同淡出后的移除定时器一起取消，并把透明度复位：
+      // mount() 只要看到元素还 connected 就会复用它，若不移除那个 400ms 定时器，
+      // 新注册的进度会写进一个全透明、且马上要被删掉的元素里 —— 用户什么都看不到
+      clearTimeout(this.removeTimer);
+      this.removeTimer = null;
+      if (this.el) this.el.style.opacity = '';
       this.render();
     },
 
@@ -556,7 +567,7 @@
       const el = this.el;
       if (!el) return;
       el.style.opacity = '0';
-      setTimeout(() => el.remove(), 400);
+      this.removeTimer = setTimeout(() => { el.remove(); this.removeTimer = null; }, 400);
     }
   };
 
@@ -624,6 +635,16 @@
     deadHostStamps[origin] = Date.now();
     deadHosts.add(origin);
     trimStamps(deadHostStamps, deadHosts, DEAD_HOST_MAX, DEAD_HOST_KEY);
+    dropPreconnectHost(origin);
+  }
+
+  // 把某个域名从预连接名单里剔除（判死时调用），腾出 IMG_HOST_MAX 的位子给健康域名
+  function dropPreconnectHost(origin) {
+    try {
+      const prev = JSON.parse(localStorage.getItem(IMG_HOST_KEY) || '[]');
+      const next = prev.filter(h => h !== origin);
+      if (next.length !== prev.length) localStorage.setItem(IMG_HOST_KEY, JSON.stringify(next));
+    } catch (e) {}
   }
 
   // 启动时把 TTL 内的失败记录读回来
@@ -702,6 +723,7 @@
       if (!failed) trackHostResult(origin, 'ok');
       else if (outcome === 'hard') { rememberBadImage(url); trackHostResult(origin, 'hard'); }
       else if (outcome === 'timeout') rememberBadImage(url);
+      else if (outcome === 'cached-hard') rememberBadImage(url);   // 只记图，不喂熔断
 
       thumbProgress.settle(failed);
       if (failed) {
@@ -728,11 +750,13 @@ imgQueue.push(() => {
         if (deadHosts.has(origin)) { done(true, 'skip'); return; }
       img.src = attempt === 0 ? url : url + (url.indexOf('?') === -1 ? '?' : '&') + '_r=' + attempt;
       // 命中缓存时不会再派发 load / error，必须自己结算一次。
-      // 缓存里的失败结果同样算硬失败：它说明这个地址确实取不到，值得写进失败记忆；
-      // 但它失败得极快、不占预算，喂给熔断没有价值，所以只记图、不动图床计数。
+      // 实测：只有"缓存里已有成功图"才会让新 src 同步 complete=true；把某个已经失败的地址
+      // 再赋一次，complete 会被同步重置为 false —— 所以下面这条失败分支实际上极少走到。
+      // 真走到时按 'cached-hard' 结算：写失败记忆，但不喂图床熔断
+      // （熔断是给"域名级不可达"用的硬证据，一张缓存里的坏图不该有资格动它）。
       if (img.complete) {
         const ok = img.naturalWidth > 0;
-        done(!ok, ok ? 'ok' : 'hard');
+        done(!ok, ok ? 'ok' : 'cached-hard');
         return;
       }
       armWait();
@@ -1151,7 +1175,11 @@ imgQueue.push(() => {
           const tid = tb.id?.match(/\d+/)?.[0];
           return tid && fallbackTids.includes(tid);
         });
-      if (fallbackBatch.length > 0) loadFallbackThumbs(fallbackBatch);
+      if (fallbackBatch.length > 0) {
+        // 补 catch：内部取图自身是 catch 过的，但 attachDetailThumbs / DOM 操作万一抛错
+        // 就会变成 unhandled rejection，污染控制台并掩盖真实原因
+        loadFallbackThumbs(fallbackBatch).catch(e => log('回捞详情图异常', e));
+      }
     }
   }
 
