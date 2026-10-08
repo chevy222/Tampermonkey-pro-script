@@ -455,9 +455,10 @@
             var nodes = mutation.addedNodes;
             for (var i = 0; i < nodes.length; i++) {
                 var node = nodes[i];
-                // 单个 IMG 的登记是 O(1)，就地做掉、不进 50ms 批量：
-                // 摘 src 必须赶在浏览器自己发起原生 lazy 请求之前（实测放进批量里会有约 20/47 张被抢先，
-                // 那些图先按原地址发一次、之后又按窗口发的地址再发一次）。其余节点仍走批量，避免遍历放大
+                // 单个 IMG 的登记是 O(1)，就地做掉、不进 50ms 批量，让"摘 src"尽可能早。
+                // 注意这只是尽力而为：实测仍有约 20 张/页会输给浏览器的原生 lazy 请求
+                // （它先按原地址发一次）。生产环境里两次请求是同一个 URL，浏览器会复用
+                // 同一条在途请求或命中缓存，所以不产生额外流量。其余节点仍走批量，避免遍历放大
                 if (node.nodeType === 1 && node.tagName === 'IMG') pickImage(node);
                 else pendingNodes.push(node);
             }
