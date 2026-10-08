@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂缩略图
 // @namespace    http://98tang.com/
-// @version      3.2
+// @version      3.3
 // @description  PC列表页从移动版触屏模板取缩略图，页面打开时一次性全部加载（无懒加载、无滚动触发、无按需加载），宽屏单列布局 + 加载进度提示 + 失败自动重试；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -18,7 +18,7 @@
 
   // 版本号，与头部 @version 保持一致。运行时写到 <html data-sehua="..."> 上，
   // 用于随时确认浏览器里实际加载的是哪一版（改了文件但没重新导入时一眼可见）
-  const VERSION = '3.2';
+  const VERSION = '3.3';
 
   // 服务端只凭请求头 User-Agent 分发模板，这是整个缩略图方案成立的唯一开关。
   // 不能用"浏览器伪装 UA 直接访问"代替：触屏模板自带的 JS 会用 "ontouchend" in document 判定后
@@ -1129,6 +1129,22 @@ imgQueue.push(() => {
 
   // ============================ 详情页 / 首页 ============================
 
+  // 详情页：站点对正文里少数图片只给 file 属性、不给 src（Discuz 的按需加载写法）。
+  // 实测（thread-3820178）：刷新后不滚动时这 2 张是 1x1 空白、已加载 57/59；
+  // 滚动进视口后站点自己的 JS 才把 file 拷成 src，变成 59/59。
+  // "打开即全量加载"的前提下不能留这个尾巴，所以在 DOM 就绪时直接补齐。
+  // 只补 src，保留 file —— 站点的灯箱（showImage）还要读 file 取大图。
+  function materializeFileOnlyImages() {
+    let n = 0;
+    document.querySelectorAll('#postlist img[file]:not([src])').forEach(img => {
+      const real = img.getAttribute('file');
+      if (!real) return;
+      img.setAttribute('src', real);
+      n++;
+    });
+    if (n > 0) log(`补齐 ${n} 张只给 file、没给 src 的正文图`);
+  }
+
   function detailPageMain() {
     log('详情页模式');
     // 与列表页同理：URL 是帖子页不代表正文就是帖子。年龄门中间页没有 #postlist，
@@ -1144,6 +1160,7 @@ imgQueue.push(() => {
       #postlist ignore_js_op img.zoom { display: block; margin-left: auto; margin-right: auto; }
     `);
     removeUnused();
+    materializeFileOnlyImages();
   }
 
   function homePageMain() {
