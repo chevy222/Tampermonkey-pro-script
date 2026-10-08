@@ -214,7 +214,13 @@
 
     // 结算成功：图床健康度清零，立刻让窗口补下一张
     function succeed(img) {
-        if (img._state === 'settled') return;
+        if (img._state === 'settled') {
+            // 迟到的 load：超时被按失败结算之后，原来的请求才终于完成。
+            // 图现在能看了，必须把压暗标记和失败计数收回来，否则这张图会一直蒙着 15% 灰
+            if (img._failed) { img._failed = false; failedCount--; renderProgress(); }
+            img.classList.remove('lazy-failed');
+            return;
+        }
         releaseSlot(img);
         img._state = 'settled';
         hostFails[img._host] = 0;
