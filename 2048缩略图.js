@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048缩略图
 // @namespace    https://fby.hfz300.com/
-// @version      3.1
+// @version      3.2
 // @description  打开页面即全量预加载全部图片：滑动窗口控制并发、失败自动重试与死图床熔断、右下角常驻加载进度。不监听滚动，滚动不触发任何加载。附带去广告、隐藏侧栏、图床 preconnect、跨域图 no-referrer、节点复用自动重试。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
@@ -327,14 +327,23 @@
     /* ============================== 图片登记 ============================== */
 
     // 只接管跨域图片（图床）；站内图标、相对路径装饰图、空 src 一律不碰。
+    // 真实地址有两种放法，两种都要认：
+    //   · 列表页 —— 真实地址已写在 src，另带原生 loading=lazy
+    //   · 检索页 —— src 是内联 base64 占位图、真实地址在 data-src（87 张全这样）
     // 空 src 不标记 _picked：站点稍后才会写进去（例如详情页的 .big_img），等 src 变了再登记。
-    // data: 内联图必须在这里挡掉：new URL 会给出 origin "null"，会把 no-referrer 和一条
-    // href="null" 的无效 preconnect 打到它身上（页面实测有 1 张 data: 图）
+    // data: 内联图如果 data-src 里也没有地址，必须挡掉：new URL 会给出 origin "null"，
+    // 会把 no-referrer 和一条 href="null" 的无效 preconnect 打到它身上
     function pickImage(img) {
         if (!img || img.tagName !== 'IMG' || img._picked) return;
-        var src = img.getAttribute('src') || '';
-        if (!src) return;
-        if (src.indexOf('data:') === 0) { img._picked = true; return; }
+
+        var cur = img.getAttribute('src');
+        var src = cur || '';
+        var lazy = img.getAttribute('data-src') || img.getAttribute('data-original') ||
+                   img.getAttribute('data-lazy-src') || '';
+        if (lazy && (!src || src.indexOf('data:') === 0)) src = lazy.trim();
+
+        if (!src) return;                                              // 还没拿到地址，等 src 变了再看
+        if (src.indexOf('data:') === 0) { img._picked = true; return; } // 纯内联图，不归脚本管
         var host = crossOriginOf(src);
         if (!host) { img._picked = true; return; }
 
@@ -348,33 +357,35 @@
         watchImg(img);
         if (!img._counted) { img._counted = true; totalCount++; renderProgress(); }
 
-        // 已经抓完的图（命中缓存、或站点在脚本接管前就把请求发出去了）：直接结算，不再重发。
-        // succeed 对没占窗口位的图不会去减计数，所以这里不必先假占一个位
-        if (img.complete && img.naturalWidth > 0) {
-            succeed(img);
-            return;
-        }
-
-        if (img.getAttribute('loading') === 'lazy') {
-            // 摘掉 src 交给窗口统一放行。只要还挂着原生 loading=lazy，浏览器自己的视距阈值
-            // 就会越过窗口把整页请求一次打出去（实测 47 张里有 40 张会被浏览器自己抓走）；
-            // 顺序也不能反：先摘 src 再把 loading 改成 eager，否则当前这一张会立刻发请求
+        // 需要自己发请求的两种情况：src 还是占位（检索页的 base64），或挂了原生 loading=lazy。
+        // 判断必须放在"已抓完"快路径之前：检索页的占位图本身就是 complete 的（base64 能解码出像素），
+        // 先走快路径就会把占位图当成功结算，真图永远不加载
+        if (cur !== img._url || img.getAttribute('loading') === 'lazy') {
+            // 顺序不能反：先摘 src 再把 loading 改成 eager，否则当前这一张会立刻按占位地址发请求
             img._selfSrc = null;
             img.removeAttribute('src');
             img.loading = 'eager';
             img._state = 'queued';
             pending.push(img);
             pump();
-        } else {
-            // 服务端已给出可请求地址、没标 lazy：浏览器早就在下载了，这里撤不掉。
-            // 仍然占一个窗口位——注意这不是"绕过上限"，恰恰相反：这些请求已经在飞，
-            // 把它们计入 inFlight 是让计数更保守（详情页实测会到 17 个，占满窗口、
-            // pending 里没有图可发而已）。要真限流只能不给 src，那是另一套设计
-            img._state = 'inflight';
-            inFlight++;
-            img._timer = setTimeout(function () { failImg(img, false); }, IMG_TOTAL_WAIT_MS);
-            pump();
+            return;
         }
+
+        // 已经是真实地址在下载：命中缓存或站点早已发过请求的，直接结算，不再重发。
+        // succeed 对没占窗口位的图不会去减计数，所以这里不必先假占一个位
+        if (img.complete && img.naturalWidth > 0) {
+            succeed(img);
+            return;
+        }
+
+        // 服务端已给出可请求地址、没标 lazy：浏览器早就在下载了，这里撤不掉。
+        // 仍然占一个窗口位——注意这不是"绕过上限"，恰恰相反：这些请求已经在飞，
+        // 把它们计入 inFlight 是让计数更保守（详情页实测会到 17 个，占满窗口、
+        // pending 里没有图可发而已）。要真限流只能不给 src，那是另一套设计
+        img._state = 'inflight';
+        inFlight++;
+        img._timer = setTimeout(function () { failImg(img, false); }, IMG_TOTAL_WAIT_MS);
+        pump();
     }
 
     function sweep(root) {
