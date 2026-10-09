@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048缩略图
 // @namespace    https://fby.hfz300.com/
-// @version      3.2
+// @version      3.3
 // @description  打开页面即全量预加载全部图片：滑动窗口控制并发、失败自动重试与死图床熔断、右下角常驻加载进度。不监听滚动，滚动不触发任何加载。附带去广告、隐藏侧栏、图床 preconnect、跨域图 no-referrer、节点复用自动重试。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
@@ -33,6 +33,25 @@
     // 该域名还没开始的图片直接判失败，不再白占窗口位。
     // 超时不算——一次冷启动抖动不该把整个域名判死。任一成功即清零
     var HOST_FAIL_THRESHOLD = 3;
+
+    // ============ 失败记忆（localStorage） ============
+    // 成功的图不需要脚本记：图床自带 Cache-Control: max-age=2592000（30 天），刷新直接命中浏览器缓存。
+    // 需要记住的是**失败**：站点里确实存在已失效的图床域名和已删除的附件，它们每次都要把
+    // "重试 + 等待预算"走满才被清理，刷新一次就重来一遍。下面三张表把失败结论存进 localStorage，
+    // TTL 之内直接跳过：不发请求、不占窗口位、不等重试。
+    // 表结构统一是「名称 → 时间戳」；读回时顺手清掉过期项，写入超上限时丢最早的一条。
+    // TTL 都取得保守——超时只是"慢"的弱证据，记太久会让一次网络抖动变成长时间的缺图
+    var BAD_IMAGE_KEY = 't2048BadImages';
+    var BAD_IMAGE_TTL = 5 * 60 * 1000;      // 硬失败（404 / 连接被拒）的单张图记忆时长
+    var BAD_IMAGE_MAX = 300;
+    var SLOW_IMAGE_KEY = 't2048SlowImages';
+    var SLOW_IMAGE_TTL = 60 * 1000;         // 超时（只是慢）单独一张表，60 秒只够挡住"刷新立刻再试一遍"
+    var SLOW_IMAGE_MAX = 300;
+    var DEAD_HOST_KEY = 't2048DeadHosts';
+    var DEAD_HOST_TTL = 10 * 60 * 1000;     // 判死的图床；影响面比单张图大，所以更短
+    var DEAD_HOST_MAX = 16;
+    var IMG_HOST_KEY = 't2048ImgHosts';     // 见过的图床域名，供下次 document-start 抢先握手
+    var IMG_HOST_MAX = 4;
 
     // 加载状态：全部结算后延迟这么久开始淡出（淡出 0.3s，再 0.4s 后移除）
     var PROGRESS_HIDE_DELAY_MS = 2500;
@@ -72,6 +91,115 @@
     }
     injectStyle();
 
+    /* ============================== 失败记忆 ============================== */
+
+    // 见文件顶部 BAD_IMAGE_KEY 处的说明。"名称 → 时间戳"，直接用对象本身当查找表
+    var badImages = {};
+    var slowImages = {};
+    var deadHosts = {};
+
+    function writeStampTable(key, table) {
+        // 隐私模式 / 配额满都会抛，静默忽略：记忆失效只是退化成旧行为，不该影响加载
+        try { localStorage.setItem(key, JSON.stringify(table)); } catch (e) {}
+    }
+
+    // 读一张表，顺手清掉过期项
+    function readStampTable(key, ttl) {
+        var raw;
+        try { raw = JSON.parse(localStorage.getItem(key) || '{}'); } catch (e) { return {}; }
+        if (!raw || typeof raw !== 'object' || raw instanceof Array) return {};
+        var now = Date.now(), out = {}, pruned = false;
+        for (var k in raw) {
+            if (!Object.prototype.hasOwnProperty.call(raw, k)) continue;
+            var t = raw[k];
+            if (!k || typeof t !== 'number' || now - t > ttl) { pruned = true; continue; }
+            out[k] = t;
+        }
+        if (pruned) writeStampTable(key, out);
+        return out;
+    }
+
+    // 超过上限时丢掉最早的一条
+    function trimStamps(stamps, max, key) {
+        var keys = Object.keys(stamps);
+        if (keys.length > max) {
+            keys.sort(function (a, b) { return stamps[a] - stamps[b]; })
+                .slice(0, keys.length - max)
+                .forEach(function (k) { delete stamps[k]; });
+        }
+        writeStampTable(key, stamps);
+    }
+
+    // soft=true 表示这次失败只是"超时/慢"，进短 TTL 的表；否则按硬失败记 5 分钟
+    function rememberBadImage(url, soft) {
+        if (!url) return;
+        if (soft) { slowImages[url] = Date.now(); trimStamps(slowImages, SLOW_IMAGE_MAX, SLOW_IMAGE_KEY); }
+        else { badImages[url] = Date.now(); trimStamps(badImages, BAD_IMAGE_MAX, BAD_IMAGE_KEY); }
+    }
+
+    // 命中任意一张表就跳过（不请求、不占窗口位）
+    function knownBad(url) { return !!(badImages[url] || slowImages[url]); }
+
+    // 忘掉某张图的失败记录（用户点重试时用）
+    function forgetBadImage(url) {
+        if (!badImages[url] && !slowImages[url]) return;
+        delete badImages[url];
+        delete slowImages[url];
+        writeStampTable(BAD_IMAGE_KEY, badImages);
+        writeStampTable(SLOW_IMAGE_KEY, slowImages);
+    }
+
+    function rememberDeadHost(origin) {
+        if (!origin) return;
+        deadHosts[origin] = Date.now();
+        trimStamps(deadHosts, DEAD_HOST_MAX, DEAD_HOST_KEY);
+        forgetHostInList(origin);   // 腾出预连接名单的位子给健康域名
+    }
+
+    // 图床恢复可用（该域名有图加载成功）时立刻忘掉它，别让失效记录一直生效
+    function forgetHost(origin) {
+        if (!deadHosts[origin]) return;   // 没记录就不写盘，否则每张图成功都要写一次 localStorage
+        delete deadHosts[origin];
+        writeStampTable(DEAD_HOST_KEY, deadHosts);
+    }
+
+    function loadFailureMemory() {
+        badImages = readStampTable(BAD_IMAGE_KEY, BAD_IMAGE_TTL);
+        slowImages = readStampTable(SLOW_IMAGE_KEY, SLOW_IMAGE_TTL);
+        deadHosts = readStampTable(DEAD_HOST_KEY, DEAD_HOST_TTL);
+    }
+
+    /* -------- 已见过的图床域名：供下次 document-start 抢先握手 -------- */
+
+    function readHostList() {
+        var a;
+        try { a = JSON.parse(localStorage.getItem(IMG_HOST_KEY) || '[]'); } catch (e) { return []; }
+        if (!(a instanceof Array)) return [];
+        return a.filter(function (h) { return typeof h === 'string' && h; });
+    }
+
+    function writeHostList(list) {
+        try { localStorage.setItem(IMG_HOST_KEY, JSON.stringify(list.slice(0, IMG_HOST_MAX))); } catch (e) {}
+    }
+
+    function rememberHost(origin) {
+        var cur = readHostList();
+        if (cur[0] === origin) return;   // 已经在最前面，不用写盘
+        var next = [origin].concat(cur.filter(function (h) { return h !== origin; }))
+                           .filter(function (h) { return !deadHosts[h]; });
+        writeHostList(next);
+    }
+
+    function forgetHostInList(origin) {
+        var cur = readHostList(), next = cur.filter(function (h) { return h !== origin; });
+        if (next.length !== cur.length) writeHostList(next);
+    }
+
+    // document-start 调用：用上次学到的图床域名抢先握手（首次访问列表为空，无副作用）
+    function preconnectLearnedHosts() {
+        readHostList().forEach(function (h) { preconnectHost(h); });
+    }
+
     /* ============================== 图床预连接 ============================== */
 
     // 图片的 src 会被本脚本摘掉交给窗口统一放行，preload scanner 因此看不到图床地址，
@@ -92,7 +220,8 @@
     }
 
     function preconnectHost(origin) {
-        if (!origin || preconnectedHosts[origin]) return;
+        // 失败记忆里已判定不可达的域名不再白握手一次
+        if (!origin || preconnectedHosts[origin] || deadHosts[origin]) return;
         preconnectedHosts[origin] = true;   // 先占位，避免同一域名并发插入多条
         insertPreconnect(origin, 0);
     }
@@ -224,6 +353,7 @@
         releaseSlot(img);
         img._state = 'settled';
         hostFails[img._host] = 0;
+        forgetHost(img._host);   // 这个域名有图成功了，撤销失效记忆
         img.classList.remove('lazy-failed');
         finishedCount++;
         renderProgress();
@@ -255,6 +385,7 @@
         if (isHard) {
             if (img._tries === 0) hostFails[host] = (hostFails[host] || 0) + 1;
             if (hostFails[host] >= HOST_FAIL_THRESHOLD) {
+                rememberDeadHost(host);   // 整个域名判死，记进失败记忆，下次直接跳过
                 dropHost(host);
                 giveUp(img);
                 pump();
@@ -262,7 +393,8 @@
             }
         }
         img._tries++;
-        if (img._tries > IMG_RETRY_TIMES) { giveUp(img); pump(); return; }
+        // 重试用尽：按本次失败的性质记账——硬失败记 5 分钟，超时只记 60 秒
+        if (img._tries > IMG_RETRY_TIMES) { rememberBadImage(img._url, !isHard); giveUp(img); pump(); return; }
         img._state = 'backoff';
         backoff++;
         setTimeout(function () {
@@ -317,7 +449,10 @@
         }
         img.classList.remove('lazy-failed');
         img._tries = 0;
-        // 用户明确要求重试，把该图床的熔断计数清掉，否则图床已被判死时这次点击会被立刻放弃
+        // 用户明确要求重试：把这张图的失败记忆与该图床的熔断计数都清掉，
+        // 否则"命中失败记忆直接跳过"或"图床已被判死"会让这次点击被立刻放弃
+        forgetBadImage(img._url);
+        forgetHost(img._host);
         hostFails[img._host] = 0;
         img._state = 'queued';
         pending.push(img);
@@ -354,8 +489,21 @@
         img.referrerPolicy = 'no-referrer';
         img.decoding = 'async';
         preconnectHost(host);
+        rememberHost(host);     // 记下来供下次 document-start 抢先握手
         watchImg(img);
         if (!img._counted) { img._counted = true; totalCount++; renderProgress(); }
+
+        // 命中失败记忆（硬失败 5 分钟 / 超时 60 秒）：不发请求、不占窗口位、不等重试，
+        // 直接按失败结算。图会压暗，点它仍可强制重试（manualRetry 会清掉这条记录）
+        if (knownBad(img._url)) {
+            img._state = 'settled';
+            img._failed = true;
+            img.classList.add('lazy-failed');
+            finishedCount++;
+            failedCount++;
+            renderProgress();
+            return;
+        }
 
         // 需要自己发请求的两种情况：src 还是占位（检索页的 base64），或挂了原生 loading=lazy。
         // 判断必须放在"已抓完"快路径之前：检索页的占位图本身就是 complete 的（base64 能解码出像素），
@@ -497,6 +645,12 @@
     startObserver();
 
     /* ============================== 启动 ============================== */
+
+    // 必须在图片开始登记之前完成：读回上次的失败记忆（用来直接跳过已知坏图/死图床），
+    // 并用上次学到的图床域名抢先握手——此时 <head> 刚建立、任何图片都还没出现，
+    // 把握手从"第一张图出现时"提前到 document-start
+    loadFailureMemory();
+    preconnectLearnedHosts();
 
     // 解析期已经由 MutationObserver 逐节点登记，DOM 就绪后再全量扫一遍，
     // 兜住极少数没走 addedNodes 分支的节点；同时补渲染一次状态，
