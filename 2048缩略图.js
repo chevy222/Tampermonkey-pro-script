@@ -207,14 +207,12 @@
     // 按 origin 去重；不加 crossorigin（缩略图是普通 <img> 非 CORS 请求）
     var preconnectedHosts = {};
 
-    // 只返回需要预连接的跨域 origin：同源不建；https 页面里的 http 源不建
-    // （按混合内容规则它最终不会走 http，预连接只会白建一条连接）。
-    // 图床域名轮换很频繁，出现 http-only 域名的可能是真实的，这条不是死分支
+    // 只返回需要预连接的跨域 origin：同源返回 null（站内图标、相对路径装饰图都靠这个挡掉）。
+    // https 页面里的 http 源不用在这里处理——pickImage 已经把它升级成 https 了
     function crossOriginOf(url) {
         try {
             var u = new URL(url, location.href);
             if (u.host === location.host) return null;
-            if (u.protocol === 'http:' && location.protocol === 'https:') return null;
             return u.origin;
         } catch (e) { return null; }
     }
@@ -476,6 +474,13 @@
         var lazy = img.getAttribute('data-src') || img.getAttribute('data-original') ||
                    img.getAttribute('data-lazy-src') || '';
         if (lazy && (!src || src.indexOf('data:') === 0)) src = lazy.trim();
+
+        // https 页面里的 http 图片：按混合内容规则浏览器本来就会把它升级成 https 再取，
+        // 所以这里也升级后接管。不升级就会掉进"同源/不可用"分支被跳过——实测检索页真有
+        // 这种老帖（http://eleggp.com/…），跳过意味着它只能等滚动到、站点自己换 src 才出现
+        if (location.protocol === 'https:' && src.indexOf('http://') === 0) {
+            src = 'https://' + src.slice(7);
+        }
 
         if (!src) return;                                              // 还没拿到地址，等 src 变了再看
         if (src.indexOf('data:') === 0) { img._picked = true; return; } // 纯内联图，不归脚本管
