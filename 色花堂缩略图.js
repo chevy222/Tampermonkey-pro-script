@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂缩略图
 // @namespace    http://98tang.com/
-// @version      3.3
+// @version      3.8
 // @description  PC列表页从移动版触屏模板取缩略图，页面打开时一次性全部加载（无懒加载、无滚动触发、无按需加载），宽屏单列布局 + 加载进度提示 + 失败自动重试；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -18,7 +18,7 @@
 
   // 版本号，与头部 @version 保持一致。运行时写到 <html data-sehua="..."> 上，
   // 用于随时确认浏览器里实际加载的是哪一版（改了文件但没重新导入时一眼可见）
-  const VERSION = '3.3';
+  const VERSION = '3.8';
 
   // 服务端只凭请求头 User-Agent 分发模板，这是整个缩略图方案成立的唯一开关。
   // 不能用"浏览器伪装 UA 直接访问"代替：触屏模板自带的 JS 会用 "ontouchend" in document 判定后
@@ -471,6 +471,20 @@
   const WIDE_CSS = `
     .wp { width: 100% !important; margin: 0 !important; box-sizing: border-box !important; }
     #nv { width: 100% !important; left: 0 !important; right: 0 !important; }
+    /* 门户首页的 DIY 容器。站点在内联 <style> 里钉了 div#diy_chart{width:960px;margin:0 auto}，
+       选择器带元素名、特异性高于裸 #diy_chart，所以必须 !important。
+       不放开它的话，里面的 #framerXXXX 框架（幻灯 + 推荐那一片）仍按 960 居中，
+       只加宽 .wp 与 #ct 完全看不出效果。它两列是按百分比分的（1/3 + 2/3），放开即自动撑满。 */
+    #diy_chart { width: 100% !important; margin: 0 !important; box-sizing: border-box !important; }
+    /* 放开 #diy_chart 后，里面的幻灯仍不跟着宽 —— 站点给每条 li 写了行内
+       width:310px; height:275px，容器宽了它也不变，于是图右边空出一截
+       （1440 宽下实测缝隙 159px，从图的右边界 320 一直到右列左边界 479）。
+       行内样式要用 !important 压；另外站点自己的 object-fit 是默认的 fill，
+       原图 2184x1468（1.49:1）被拉成 310x275（1.13:1）本就在变形，
+       这里一并改成 cover 填满，顺带修掉拉伸。li 的 overflow 本来就是 hidden，
+       所以裁切不会溢出；高度不动（275），与右列表格保持齐平。 */
+    #diy_chart .slideshow li { width: 100% !important; }
+    #diy_chart .slideshow li img { width: 100% !important; height: 100% !important; object-fit: cover !important; }
   `;
 
   const PAGE_CSS = `
@@ -1064,9 +1078,18 @@ imgQueue.push(() => {
 
     removeUnused();
 
+    // 空结果页（站点显示"对不起，没有找到匹配结果。"）上 `.sttl.mbn` 这条**依然存在**，
+    // 所以光靠"有没有 .sttl.mbn"判断能不能处理是不够的 —— 实测会把过滤开关插在
+    // "没有找到匹配结果"上方，一个没有结果的页面顶着五个筛选框。
+    // 未登录时 search.php 只返回空壳，同样一条 li.pbw 都没有。两种情况都直接退出。
+    if (!document.querySelector('#threadlist li.pbw')) {
+      log('搜索页没有结果项（空结果或未登录空壳），跳过开关与取图');
+      return;
+    }
+
     const switchWrap = addForumSwitches();
     if (!switchWrap) {
-      // 未登录时 search.php 只返回空壳，没有 .sttl.mbn
+      // 兜底：结果在、但放置开关的 .sttl.mbn 缺失
       log('未找到 .sttl.mbn，跳过搜索页处理');
       return;
     }
@@ -1129,20 +1152,33 @@ imgQueue.push(() => {
 
   // ============================ 详情页 / 首页 ============================
 
-  // 详情页：站点对正文里少数图片只给 file 属性、不给 src（Discuz 的按需加载写法）。
-  // 实测（thread-3820178）：刷新后不滚动时这 2 张是 1x1 空白、已加载 57/59；
-  // 滚动进视口后站点自己的 JS 才把 file 拷成 src，变成 59/59。
-  // "打开即全量加载"的前提下不能留这个尾巴，所以在 DOM 就绪时直接补齐。
-  // 只补 src，保留 file —— 站点的灯箱（showImage）还要读 file 取大图。
-  function materializeFileOnlyImages() {
-    let n = 0;
-    document.querySelectorAll('#postlist img[file]:not([src])').forEach(img => {
+  // 详情页：把**站点自己**的"滚动才补图"彻底掐掉。
+  // 站点的真实做法（forum_viewthread.js 里那个 lazyload 类）：
+  //   if (img.getAttribute('file') && !img.getAttribute('lazyloaded'))
+  //     · 屏外 → 攒进 lazyload.imgs，等滚动再处理
+  //     · 屏内 → 立刻把 file 写进 src
+  //   _attachEvent(window, 'scroll', function(){ obj.showImage(); });
+  // 关键：这些图**不是没有 src，而是 src 被写成 Discuz 的空图占位**
+  //   src="static/image/common/none.gif"（1x1），真地址在 file 里。
+  // 实测 thread-3200087：701 张图里 217 张带 file，**217 张全部是 none.gif 占位**
+  //   （file 无 src 的 0 张、src 已是真图的 0 张）；不滚动时站点队列里攒着 216 张，
+  //   滚到底才全部放行 —— 这就是"滚动加载"的真身。
+  // 别被 naturalWidth 骗了：none.gif 也能让 naturalWidth>0，所以"已加载 701"是假象，
+  //   必须按"src 是不是占位符"来判断。
+  // 处理方式：src 缺失**或还是占位符**就换成 file，然后统一打 lazyloaded 标记。
+  // 标记之后它的 initImages() 一张都收不到、showImage() 直接 return false，
+  // 那个 scroll 监听就成了空转 —— 这才是真掐掉，而不只是让它看不出效果。
+  // 即使站点先跑过、已经把屏外图攒进队列也没关系：showImage() 每次开头都会
+  // initImages() 重置队列，重置后就再也收不进东西了。
+  function disableSiteLazyLoad() {
+    let 换src = 0, 标记 = 0;
+    document.querySelectorAll('#postlist img[file]').forEach(img => {
       const real = img.getAttribute('file');
-      if (!real) return;
-      img.setAttribute('src', real);
-      n++;
+      const cur = img.getAttribute('src');
+      if (real && (!cur || isPlaceholder(cur))) { img.setAttribute('src', real); 换src++; }
+      if (!img.getAttribute('lazyloaded')) { img.setAttribute('lazyloaded', 'true'); 标记++; }
     });
-    if (n > 0) log(`补齐 ${n} 张只给 file、没给 src 的正文图`);
+    if (换src || 标记) log(`正文图：${换src} 张从占位符换成真地址、${标记} 张打上 lazyloaded（掐掉站点滚动补图）`);
   }
 
   function detailPageMain() {
@@ -1160,7 +1196,7 @@ imgQueue.push(() => {
       #postlist ignore_js_op img.zoom { display: block; margin-left: auto; margin-right: auto; }
     `);
     removeUnused();
-    materializeFileOnlyImages();
+    disableSiteLazyLoad();
   }
 
   function homePageMain() {
