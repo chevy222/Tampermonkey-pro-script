@@ -3,6 +3,7 @@
 // @namespace    http://98tang.com/
 // @version      3.10
 // @description  PC列表页从移动版触屏模板取缩略图，页面打开时一次性全部加载（无懒加载、无滚动触发、无按需加载），宽屏单列布局 + 加载进度提示 + 失败自动重试；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新；失败图压暗留位 + 角标 ↻ 手动重试；双注入防护；迟到 load 回收。
+// 失败记忆分三层，互相独立：sehuaBadImages（硬失败单图，TTL 5min）、sehuaSlowImages（超时单图，TTL 60s）、sehuaDeadHosts（图床，仅本次页面加载内作为熔断闸门，跨刷新不拦）。要恢复尝试：清掉 sehuaBadImages + sehuaSlowImages 后刷新即可。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
 // @connect      bhagq.4yl7j.com
@@ -17,7 +18,8 @@
   // ============================ 可调参数 ============================
 
   // 版本号，document-start 阶段写到 <html data-sehua="..."> 上（兼作双注入哨兵）
-  const VERSION = '3.9';
+  // 必须与文件头 @version 保持一致，否则哨兵值与声明版本对不上，排障时会误判
+  const VERSION = '3.10';
 
   // 防双注入（Tampermonkey 装重 / 多渠道注入）：先占位，后到的实例原路退出
   if (document.documentElement.getAttribute('data-sehua')) return;
@@ -62,8 +64,12 @@
   // 单张图片的总等待上限，跨所有重试共享
   const IMG_TOTAL_WAIT_MS = 45000;
 
-  // 同一图床连续硬失败这么多次即判不可达；超时不算，任一成功即清零
+  // 同一图床连续硬失败这么多次即判不可达；任一成功即清零
   const HOST_FAIL_THRESHOLD = 3;
+
+  // 同一图床连续「超时」这么多次同样判不可达：挂住不回 = 不可用，只是证据弱，故阈值放宽。
+  // 不加这条的话，一个整体挂住的图床永远不会触发熔断，每轮刷新都全量重试。
+  const HOST_TIMEOUT_THRESHOLD = 8;
 
   // ============ 失败记忆 ============
   // 记住加载失败的图和死图床，刷新页面后直接跳过
@@ -77,8 +83,13 @@
   const DEAD_HOST_TTL = 10 * 60 * 1000;    // 判死图床的记忆时长
   const DEAD_HOST_MAX = 16;
 
-  // 同时在途的缩略图请求数上限（0 = 不限制）
+  // 同时在途的缩略图请求数上限（0 = 不限制）——这是全局总闸
   const MAX_IMG_IN_FLIGHT = 16;
+
+  // 单域名在途上限。Chrome 对同一 origin 的 HTTP/1.1 只给约 6 条连接，
+  // 全局 16 会让多余的请求滞留在浏览器 socket 队列里空等，而脚本的等待计时照跑，
+  // 于是未真正发出的请求被误判超时 → 重试 → 更堵。按域名分池才是真实可控的并发。
+  const PER_HOST_IN_FLIGHT = 6;
 
   // 首屏判定余量
   const FOLD_SLACK_PX = 120;
@@ -105,7 +116,7 @@
   const IMG_SRC_ATTRS = ['file', 'zoomfile', 'data-original'];
 
   // 站内装饰图特征串：静态图标、用户头像、占位图
-  const PLACEHOLDER_MARKERS = ['static/image', 'uc_server', 'none.gif'];
+  const PLACEHOLDER_MARKERS = ['static/image', 'uc_server', 'none.gif', 'thumb-ing'];
 
   // 运行日志开关（排查时改成 true）
   const DEBUG = false;
@@ -532,7 +543,11 @@
 
   // 图床健康度
   const hostFailStreak = new Map();
+  const hostTimeoutStreak = new Map();
   const deadHosts = new Set();
+
+  // 每个域名的在途计数，配合 PER_HOST_IN_FLIGHT 做分池限流
+  const inFlightByHost = new Map();
 
   // 失败记忆
   const badImages = new Set();
@@ -621,15 +636,17 @@
     } catch (e) {}
   }
 
-  // 启动时把 TTL 内的失败记录读回来
+  // 启动时把 TTL 内的失败记录读回来。
+  // 图床记忆（sehuaDeadHosts）只做 TTL 清理与落盘，**不恢复成内存闸门**：
+  // 跨刷新一律靠图级表（badImages/slowImages）拦，保证用户清掉图级表后一定能恢复尝试，
+  // 不会出现「清了 sehuaBadImages 却还被 sehuaDeadHosts 挡住」的困惑；
+  // 同一次页面加载内的熔断仍由内存态 deadHosts 负责（trackHostResult 写入）。
   function loadFailureMemory() {
     const bad = readStampTable(BAD_IMAGE_KEY, BAD_IMAGE_TTL);
     Object.assign(badImageStamps, bad);
     Object.keys(bad).forEach(k => badImages.add(k));
 
-    const hosts = readStampTable(DEAD_HOST_KEY, DEAD_HOST_TTL);
-    Object.assign(deadHostStamps, hosts);
-    Object.keys(hosts).forEach(k => deadHosts.add(k));
+    readStampTable(DEAD_HOST_KEY, DEAD_HOST_TTL);
 
     const slow = readStampTable(SLOW_IMAGE_KEY, SLOW_IMAGE_TTL);
     Object.assign(slowImageStamps, slow);
@@ -640,12 +657,21 @@
     try { return new URL(url, location.origin).origin; } catch (e) { return null; }
   }
 
-  // 图床健康度记账：ok = 成功清零；hard = 硬失败累加；超时不上报
+  // 图床健康度记账：ok = 成功清零；hard = 硬失败累加；timeout = 弱证据、单独更宽的阈值累加
   function trackHostResult(origin, outcome) {
     if (!origin) return;
     if (outcome === 'ok') {
       hostFailStreak.delete(origin);
+      hostTimeoutStreak.delete(origin);
       forgetHost(origin);
+      return;
+    }
+    // 整体挂住不回的图床同样不可用，必须能走到熔断，
+    // 否则超时类失败永远熔断不了，每轮刷新都全量重试
+    if (outcome === 'timeout') {
+      const n = (hostTimeoutStreak.get(origin) || 0) + 1;
+      hostTimeoutStreak.set(origin, n);
+      if (n >= HOST_TIMEOUT_THRESHOLD) rememberDeadHost(origin);
       return;
     }
     const streak = (hostFailStreak.get(origin) || 0) + 1;
@@ -654,8 +680,14 @@
   }
 
   function pumpImgQueue() {
-    while (imgQueue.length > 0 && (MAX_IMG_IN_FLIGHT <= 0 || imgInFlight < MAX_IMG_IN_FLIGHT)) {
-      imgQueue.shift()();
+    for (let i = 0; i < imgQueue.length; ) {
+      if (MAX_IMG_IN_FLIGHT > 0 && imgInFlight >= MAX_IMG_IN_FLIGHT) break;
+      const task = imgQueue[i];
+      // 只做准入判断；真正的计数在 task 内部（已结算的任务会提前返回，
+      // 若在这里先加计数就会漏还一个配额，把该域名永久卡死）
+      if ((inFlightByHost.get(task._host) || 0) >= PER_HOST_IN_FLIGHT) { i++; continue; }
+      imgQueue.splice(i, 1);
+      task();
     }
   }
 
@@ -666,9 +698,11 @@
     return `calc((100% - ${(count - 1) * THUMB_GAP_PX}px) / ${count})`;
   }
 
-  // 前两次尝试用原地址（命中缓存直接成功），之后才穿透缓存
-  function attemptUrl(url, attempt) {
-    if (attempt <= 1) return url;
+  // 只有在「上一次请求已经结束」的硬错误重试时才换地址破缓存。
+  // 超时重试绝不能换地址、也不能重赋同值：那会取消浏览器仍在排队/在途的那次请求，
+  // 把它重新排到队尾，越重试越慢（实测同一图床 16 张图互相踩踏即源于此）。
+  function attemptUrl(url, attempt, refetch) {
+    if (!refetch) return url;
     return url + (url.indexOf('?') === -1 ? '?' : '&') + '_r=' + Date.now() + attempt;
   }
 
@@ -687,12 +721,16 @@
     let settled = false;
     let failedFlag = false;
     let holding = false;
+    let heldHost = null;   // 本闭包当前占用的域名配额，释放时归还
+    let refetch = false;   // 下次派发是否必须换新地址（仅硬错误重试时置真）
     let timer = null;
 
     const releaseSlot = () => {
       if (!holding) return;
       holding = false;
       imgInFlight--;
+      const used = inFlightByHost.get(heldHost) || 0;
+      inFlightByHost.set(heldHost, Math.max(0, used - 1));
       pumpImgQueue();
     };
 
@@ -705,8 +743,11 @@
 
       if (!failed) trackHostResult(origin, 'ok');
       else if (outcome === 'hard') { rememberBadImage(url); trackHostResult(origin, 'hard'); }
-      else if (outcome === 'timeout') rememberBadImage(url, true);
+      else if (outcome === 'timeout') { rememberBadImage(url, true); trackHostResult(origin, 'timeout'); }
       else if (outcome === 'cached-hard') rememberBadImage(url);
+      // 被图床熔断跳过的图也要进图级表：否则图级记忆与图床记忆脱节，
+      // 用户清 sehuaBadImages 时这些图根本没有条目，清了也看不出变化
+      else if (outcome === 'skip') rememberBadImage(url);
 
       if (manual) {
         if (!failed) {
@@ -728,15 +769,17 @@
     // 把下一次尝试排进队列（队尾）
     const queueAttempt = () => {
       if (settled) return;
-      imgQueue.push(() => {
+      const task = () => {
         if (settled) return;
         imgInFlight++;
         holding = true;
+        heldHost = origin;
+        inFlightByHost.set(origin, (inFlightByHost.get(origin) || 0) + 1);
         if (attempt === 0) startedAt = performance.now();
         if (!manual && deadHosts.has(origin)) { done(true, 'skip'); return; }
-        const nextUrl = attemptUrl(url, attempt);
-        // 重试必须重新赋值触发再取；首次且属性已是目标地址时不重复赋值
-        if (attempt > 0 || img.getAttribute('src') !== nextUrl) setImgSrc(img, nextUrl);
+        const nextUrl = attemptUrl(url, attempt, refetch);
+        // 只有地址真的变了才赋值：对同一 URL 重新赋值会取消浏览器在途/排队的请求
+        if (img.getAttribute('src') !== nextUrl) setImgSrc(img, nextUrl);
         // 命中缓存时直接结算
         if (img.complete) {
           const ok = img.naturalWidth > 0;
@@ -744,7 +787,9 @@
           return;
         }
         armWait();
-      });
+      };
+      task._host = origin;   // pumpImgQueue 据此做域名分池
+      imgQueue.push(task);
       pumpImgQueue();
     };
 
@@ -754,8 +799,9 @@
         Math.max(0, IMG_TOTAL_WAIT_MS - (performance.now() - startedAt)));
     };
 
-    function retryLater() {
+    function retryLater(hard) {
       attempt++;
+      refetch = hard;   // 只有「请求已经结束」的硬错误才换地址重发
       releaseSlot();
       const delay = IMG_RETRY_BASE_MS * attempt + Math.floor(Math.random() * 400);
       timer = setTimeout(queueAttempt, delay);
@@ -764,15 +810,16 @@
     function onTimeout() {
       if (settled) return;
       clearTimeout(timer);
-      if (attempt >= IMG_RETRY_TIMES) { done(true, 'timeout'); return; }
-      retryLater();
+      // 超时一律结算为失败，不再重发：那次请求可能还卡在浏览器的连接队列里，
+      // 重发只会取消它并把它重新排到队尾。真慢的图由「迟到 load 回收」兜底。
+      done(true, 'timeout');
     }
 
     function onError() {
       if (settled) return;
       clearTimeout(timer);
       if (attempt >= IMG_RETRY_TIMES) { done(true, 'hard'); return; }
-      retryLater();
+      retryLater(true);
     }
 
     img.addEventListener('load', () => {
@@ -794,8 +841,10 @@
     img.addEventListener('error', onError);
 
     if (!manual) thumbProgress.add(1);
-    // 命中失败记忆：直接跳过（manual 模式已在 manualRetry 里赦免，强行放行）
-    if (!manual && (badImages.has(url) || slowImages.has(url) || deadHosts.has(origin))) { done(true, 'skip'); return; }
+    // 命中图级失败记忆：直接跳过（manual 模式已在 manualRetry 里赦免，强行放行）
+    // 这里不查 deadHosts：图床闸门只负责「本次页面加载内」不再重复试探，跨刷新一律靠图级表，
+    // 这样用户清掉 sehuaBadImages 就一定能恢复尝试。
+    if (!manual && (badImages.has(url) || slowImages.has(url))) { done(true, 'skip'); return; }
     queueAttempt();
   }
 
