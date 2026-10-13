@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         2048缩略图
 // @namespace    https://fby.hfz300.com/
-// @version      3.15
-// @description  打开页面即全量预加载全部图片：滑动窗口控制并发（全局 + 单域名分池）、失败自动重试与死图床熔断、右下角常驻加载进度。不监听滚动，滚动不触发任何加载。附带去广告（含打赏卡）、隐藏侧栏、图床 preconnect、跨域图 no-referrer、节点复用自动重试；失败图压暗 + ↻ 角标/点击手动重试（赦免失败记忆）；迟到回收改持续轮询。单图总等待预算只计在途时间（冷却/排队/退避不计时），timeout 熔断不写判死记忆，慢图床免于持久拉黑。<picture>/srcset 图不接管；广告块先清后扫。
+// @version      3.16
+// @description  打开页面即全量预加载全部图片：滑动窗口控制并发（全局 + 单域名分池）、失败自动重试与死图床熔断、右下角常驻加载进度。不监听滚动，滚动不触发任何加载。附带去广告（含打赏卡）、隐藏侧栏、图床 preconnect、跨域图 no-referrer、节点复用自动重试；失败图压暗 + ↻ 角标/点击手动重试（赦免失败记忆）；迟到回收改持续轮询，且回收时同步赦免失败记忆。单图总等待预算只计在途时间（冷却/排队/退避不计时），timeout 熔断不写判死记忆，慢图床免于持久拉黑。<picture>/srcset 图不接管；广告块先清后扫。
 // 失败记忆 t2048BadImages：硬失败的单图与判死的图床共用一张表（TTL 5min）。要恢复尝试：清掉该键后刷新即可。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
@@ -17,7 +17,7 @@
     /* ============================== 可调参数 ============================== */
 
     // 版本号，document-start 阶段写到 <html data-t2048="..."> 上（兼作双注入哨兵）
-    const VERSION = '3.15';
+    const VERSION = '3.16';
 
     // 防双注入（Tampermonkey 装重 / 多渠道注入）：先占位，后到的实例原路退出。
     // 两个实例的 observer 会互相 resetImage 涨 _gen，把对方的加载闭包全部短路，图永远不结算
@@ -494,6 +494,7 @@
                 if (img.naturalWidth > 0) {
                     failedFlag = false;
                     img._wasFailed = false;
+                    forgetImage(url);   // 同步赦免记忆：图已可见，不能留着失败记录让刷新后 skip
                     thumbProgress.revive();
                     unmarkFailed(img);
                     return;
@@ -582,9 +583,12 @@
             if (img._gen !== gen) return;
             if (img.naturalWidth > 0) {
                 if (settled && failedFlag) {
-                    // 迟到 load：已按失败结算后请求才完成，撤回失败记账与暗态
+                    // 迟到 load：已按失败结算后请求才完成，撤回失败记账与暗态，
+                    // 并赦免失败记忆——否则图已可见但记忆里仍记着失败，
+                    // 5 分钟内刷新会被 skip 直接判死（"刚还好好的图，刷新后坏了"）
                     failedFlag = false;
                     img._wasFailed = false;
+                    forgetImage(url);
                     thumbProgress.revive();
                     unmarkFailed(img);
                     return;
