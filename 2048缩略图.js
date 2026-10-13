@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048缩略图
 // @namespace    https://fby.hfz300.com/
-// @version      3.10
+// @version      3.11
 // @description  打开页面即全量预加载全部图片：滑动窗口控制并发（全局 + 单域名分池）、失败自动重试与死图床熔断、右下角常驻加载进度。不监听滚动，滚动不触发任何加载。附带去广告、隐藏侧栏、图床 preconnect、跨域图 no-referrer、节点复用自动重试；失败图压暗 + ↻ 角标/点击手动重试（赦免失败记忆）；迟到 load 回收。加载引擎与「色花堂缩略图」同构：imgQueue/imgInFlight/loadThumb/done/trackHostResult。<picture>/srcset 图不接管；广告块先清后扫。
 // 失败记忆 t2048BadImages：硬失败的单图与判死的图床共用一张表（TTL 5min）。要恢复尝试：清掉该键后刷新即可。
 // @author       Chevy Yang
@@ -17,7 +17,7 @@
     /* ============================== 可调参数 ============================== */
 
     // 版本号，document-start 阶段写到 <html data-t2048="..."> 上（兼作双注入哨兵）
-    const VERSION = '3.10';
+    const VERSION = '3.11';
 
     // 防双注入（Tampermonkey 装重 / 多渠道注入）：先占位，后到的实例原路退出。
     // 两个实例的 observer 会互相 resetImage 涨 _gen，把对方的加载闭包全部短路，图永远不结算
@@ -42,7 +42,14 @@
     const HOST_FAIL_THRESHOLD = 3;
     // 同一图床连续「超时」这么多次同样判不可达；取值为一个并发窗口（PER_HOST_IN_FLIGHT），
     // 使整窗同时挂住的场景在第一批即可熔断
-    const HOST_TIMEOUT_THRESHOLD = 6;
+    // 同一图床连续「超时」这么多次判为不可用。取两个并发窗口的大小：
+    // 单个窗口的图全部超时属于「这一批恰好很慢」，不足以判定整个图床不可用
+    const HOST_TIMEOUT_THRESHOLD = 12;
+
+    // 图床熔断的冷却时长与轮次：熔断只做冷却，冷却结束自动重开、继续派发；
+    // 连续这么多轮冷却后仍拿不到一次成功，才在本次页面加载内彻底放弃
+    const HOST_COOLDOWN_MS = 10000;
+    const HOST_COOLDOWN_ROUNDS = 3;
 
     // 单域名在途上限。Chrome 对同一 origin 的 HTTP/1.1 只给约 6 条连接，
     // 全局上限放任不管会让多余的请求滞留在浏览器 socket 队列里空等，
@@ -320,6 +327,7 @@
     // 图床健康度：连续硬失败判死；任一成功即清零解封；超时另用更宽的阈值也判死
     const hostFailStreak = new Map();
     const hostTimeoutStreak = new Map();
+    const hostCooldown = new Map();
 
     // 每个域名的在途计数，配合 PER_HOST_IN_FLIGHT 做分池限流
     const inFlightByHost = new Map();
@@ -341,6 +349,7 @@
         if (outcome === 'ok') {
             hostFailStreak.delete(origin);
             hostTimeoutStreak.delete(origin);
+            hostCooldown.delete(origin);
             forgetHost(origin);
             return;
         }
@@ -349,12 +358,37 @@
         if (outcome === 'timeout') {
             const n = (hostTimeoutStreak.get(origin) || 0) + 1;
             hostTimeoutStreak.set(origin, n);
-            if (n >= HOST_TIMEOUT_THRESHOLD) rememberDeadHost(origin);
+            if (n >= HOST_TIMEOUT_THRESHOLD) openHostCooldown(origin);
             return;
         }
         const streak = (hostFailStreak.get(origin) || 0) + 1;
         hostFailStreak.set(origin, streak);
-        if (streak >= HOST_FAIL_THRESHOLD) rememberDeadHost(origin);
+        if (streak >= HOST_FAIL_THRESHOLD) openHostCooldown(origin);
+    }
+
+    // 熔断只是让该图床进入冷却，冷却结束自动重开；连续多轮都拿不到成功才彻底放弃
+    function openHostCooldown(origin) {
+        const prev = hostCooldown.get(origin);
+        const rounds = (prev ? prev.rounds : 0) + 1;
+        hostCooldown.set(origin, { until: Date.now() + HOST_COOLDOWN_MS, rounds: rounds });
+        hostFailStreak.delete(origin);
+        hostTimeoutStreak.delete(origin);
+        log(`图床进入冷却（第 ${rounds} 轮）: ${origin}`);
+        if (rounds > HOST_COOLDOWN_ROUNDS) {
+            rememberDeadHost(origin);   // 本次页面内放弃，并让下一页也不再硬撞
+            hostCooldown.delete(origin);
+        }
+    }
+
+    // 图床冷却剩余时间；> 0 表示这一轮先别发请求
+    function hostCooldownWait(origin) {
+        const c = hostCooldown.get(origin);
+        return c ? Math.max(0, c.until - Date.now()) : 0;
+    }
+
+    // 冷却超过轮次上限后已交给失败记忆处理，这里只判记忆
+    function hostGaveUp(origin) {
+        return isDeadHost(origin);
     }
 
     // 前两次尝试用原地址（命中缓存直接成功）；
@@ -415,9 +449,8 @@
             else if (outcome === 'hard') { rememberBadImage(url); trackHostResult(origin, 'hard'); }
             else if (outcome === 'timeout') trackHostResult(origin, 'timeout');
             else if (outcome === 'cached-hard') rememberBadImage(url);
-            // 被图床熔断跳过的图也要进图级表：否则图级记忆与图床记忆脱节，
-            // 用户清 t2048BadImages 时这些图根本没有条目，清了也看不出变化
-            else if (outcome === 'skip') rememberBadImage(url);
+            // skip 不进失败记忆：它只说明「这张没试过」（图床冷却中或已判死），
+            // 记下来会让下一页把同一批图直接判死，整页变砖
 
             if (manual) {
                 if (!failed) {
@@ -464,7 +497,12 @@
                 img._heldHost = origin;
                 inFlightByHost.set(origin, (inFlightByHost.get(origin) || 0) + 1);
                 if (attempt === 0) startedAt = performance.now();
-                if (!manual && isDeadHost(origin)) { done(true, 'skip'); return; }
+                if (!manual) {
+                    // 图床冷却中：整批往后挪，等冷却结束再试，不计失败也不占槽位
+                    const wait = hostCooldownWait(origin);
+                    if (wait > 0) { reQueueAfter(wait); return; }
+                    if (hostGaveUp(origin)) { done(true, 'skip'); return; }
+                }
                 const nextUrl = attemptUrl(url, attempt, refetch);
                 // 只有地址真的变了才赋值：对同一 URL 重新赋值会取消浏览器在途/排队的请求
                 if (img.getAttribute('src') !== nextUrl) setImgSrc(img, nextUrl);
@@ -486,6 +524,12 @@
             clearTimeout(timer);
             timer = setTimeout(() => { if (img._gen === gen) onTimeout(); },
                 Math.max(0, IMG_TOTAL_WAIT_MS - (performance.now() - startedAt)));
+        };
+
+        // 图床冷却期间把这次派发整体推迟，不结算也不占槽位
+        const reQueueAfter = (wait) => {
+            releaseSlot();
+            timer = setTimeout(() => { if (img._gen === gen) queueAttempt(); }, wait + 50);
         };
 
         function retryLater(hard) {
@@ -599,6 +643,7 @@
         forgetImage(img._url);
         forgetHost(img._host);
         hostFailStreak.delete(img._host);
+        hostCooldown.delete(img._host);   // 手动重试视为用户要求立刻重开该图床
         loadThumb(img, img._url, true, false);
     }
 
