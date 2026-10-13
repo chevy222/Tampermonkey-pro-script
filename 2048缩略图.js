@@ -476,19 +476,24 @@
         };
 
         // 失败后的复核。数据可能刚好在结算之后才到，此时图已经能看见，
-        // 再压着只会让人以为图坏了
+        // 再压着只会让人以为图坏了。固定 2s/6s 两点复核会miss慢图床的数据到达
+        // （实测 12 张已解出画面仍被压暗），改为持续轮询：每 2s 查一次，
+        // 直到图解出画面、节点换代或超过 60s 上限
         function recheckAfterFail() {
-            [2000, 6000].forEach(delay => {
-                setTimeout(() => {
-                    if (img._gen !== gen) return;
-                    if (!settled || !failedFlag) return;
-                    if (img.naturalWidth <= 0) return;
+            const deadline = Date.now() + 60000;
+            const tick = () => {
+                if (img._gen !== gen) return;
+                if (!settled || !failedFlag) return;
+                if (img.naturalWidth > 0) {
                     failedFlag = false;
                     img._wasFailed = false;
                     thumbProgress.revive();
                     unmarkFailed(img);
-                }, delay);
-            });
+                    return;
+                }
+                if (Date.now() < deadline) setTimeout(tick, 2000);
+            };
+            setTimeout(tick, 2000);
         }
 
         // 把下一次尝试排进队列（队尾）
