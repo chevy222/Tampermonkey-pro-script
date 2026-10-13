@@ -74,8 +74,10 @@
     const PROGRESS_HIDE_DELAY_MS = 2500;
 
     // 广告与无用块，命中即整块移除
+    // .reward-card：帖子下方的「打赏楼主」推广卡（站点后加的广告位，
+    // 含 200 金币打赏按钮/累计打赏统计/求片区导流文案，整棵树删掉）
     const REMOVE_SELECTORS = ['.recs-wrapper', '.recs-head', '.recs-row', '.recs-pill',
-                              '.nav-container', '.movie-banner'];
+                              '.nav-container', '.movie-banner', '.reward-card'];
     const REMOVE_SELECTOR = REMOVE_SELECTORS.join(',');
 
     /* ============================== 样式 ============================== */
