@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         色花堂缩略图
 // @namespace    http://98tang.com/
-// @version      3.11
-// @description  PC列表页从移动版触屏模板取缩略图，页面打开时一次性全部加载（无懒加载、无滚动触发、无按需加载），宽屏单列布局 + 加载进度提示 + 失败自动重试；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新；失败图压暗留位 + 角标 ↻ 手动重试；双注入防护；迟到 load 回收。
+// @version      3.12
+// @description  PC列表页从移动版触屏模板取缩略图，页面打开时一次性全部加载（无懒加载、无滚动触发、无按需加载），宽屏单列布局 + 加载进度提示 + 失败自动重试；搜索页栏目过滤与详情图加载；详情页宽屏去广告、正文图纳入同一加载引擎（进度提示 + 失败压暗 + 角标重试）；搜索繁忙自动刷新；失败图压暗留位 + 角标 ↻ 手动重试；双注入防护；迟到 load 回收。
 // 失败记忆 sehuaBadImages：硬失败的单图与判死的图床共用一张表（TTL 5min）。要恢复尝试：清掉该键后刷新即可。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -19,7 +19,7 @@
 
   // 版本号，document-start 阶段写到 <html data-sehua="..."> 上（兼作双注入哨兵）
   // 必须与文件头 @version 保持一致，否则哨兵值与声明版本对不上，排障时会误判
-  const VERSION = '3.11';
+  const VERSION = '3.12';
 
   // 防双注入（Tampermonkey 装重 / 多渠道注入）：先占位，后到的实例原路退出
   if (document.documentElement.getAttribute('data-sehua')) return;
@@ -423,13 +423,18 @@
   `;
 
   // 缩略图版式
+  // 失败角标：缩略图与详情页正文图共用
+  const RETRY_CSS = `
+    .sehua-retry { position: absolute; top: 4px; right: 4px; z-index: 2; display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; background: rgba(0, 0, 0, 0.65); color: #fff; font-size: 13px; line-height: 1; cursor: pointer; }
+    .sehua-retry:hover { background: rgba(0, 0, 0, 0.85); }
+  `;
+
   const THUMB_CSS = `
     .sehua-thumb { --img-width: 50%; display: flex; flex-wrap: wrap; justify-content: center; gap: ${THUMB_GAP_PX}px; margin-top: 8px; }
     .sehua-thumb img { height: auto !important; aspect-ratio: 3/2; object-fit: cover; border-radius: 4px; border: 1px solid #ddd; background: #f5f5f5; box-sizing: border-box !important; width: 100% !important; transition: border-color 0.2s ease; }
     .sehua-thumb > a { display: flex; align-items: center; justify-content: center; text-decoration: none; width: var(--img-width) !important; position: relative; }
     .sehua-thumb a.sehua-failed { opacity: 0.4; filter: grayscale(1); }
-    .sehua-retry { position: absolute; top: 4px; right: 4px; z-index: 2; display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; background: rgba(0, 0, 0, 0.65); color: #fff; font-size: 13px; line-height: 1; cursor: pointer; }
-    .sehua-retry:hover { background: rgba(0, 0, 0, 0.85); }
+    ${RETRY_CSS}
     .sehua-thumb img:hover { border-color: #4a90d9; }
     .sehua-date { display: inline-block; margin-top: 4px; font-size: 12px; color: #999; }
   `;
@@ -438,6 +443,13 @@
     #sehua-progress { position: fixed; right: 14px; bottom: 14px; z-index: 99999; padding: 7px 14px; border-radius: 999px; background: rgba(0, 0, 0, 0.75); color: #fff; font-size: 12px; line-height: 1.4; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25); transition: opacity 0.3s ease; pointer-events: none; }
     #sehua-progress.sehua-done { background: rgba(35, 120, 60, 0.85); }
     #sehua-progress.sehua-partial { background: rgba(150, 70, 20, 0.88); }
+  `;
+
+  // 详情页正文图：进度提示 + 失败角标 + 失败压暗（只压图本身，角标保持清晰）
+  const DETAIL_CSS = `
+    ${PROGRESS_CSS}${RETRY_CSS}
+    #postlist .sehua-failed { position: relative; }
+    #postlist .sehua-failed > img { opacity: 0.35; filter: grayscale(1); }
   `;
 
   // 需要缩略图的页面共用的样式前缀
@@ -843,9 +855,10 @@
     const oldBtn = anchor.querySelector('.sehua-retry');
     if (oldBtn) oldBtn.remove();
 
-    const fresh = document.createElement('img');
-    fresh.decoding = 'async';
-    fresh.loading = 'eager';
+    // 克隆原节点而不是新建空白 img：详情页正文图带有 width/class/onclick 等
+    // 站点设置的布局属性，丢了会导致重试成功后版式变形
+    const fresh = img.cloneNode(false);
+    fresh.removeAttribute('src');
     anchor.replaceChild(fresh, img);
 
     loadThumb(fresh, url, anchor, wrap, true);
@@ -1151,6 +1164,26 @@
     return touched;
   }
 
+  // 正文图登记进加载引擎：计入右下角进度，并沿用失败压暗 + 角标重试
+  function registerBodyImage(img) {
+    if (!img || img.tagName !== 'IMG' || img._sehuaBody) return;
+    const url = getRealSrc(img);
+    if (!url) return;
+    const origin = imageOrigin(url);
+    // 站内图标、表情、头像不接管
+    if (!origin || origin === location.origin) { img._sehuaBody = true; return; }
+    const wrap = img.parentElement;
+    if (!wrap || wrap === document.body || wrap === document.documentElement) return;
+    img._sehuaBody = true;
+    img.decoding = 'async';
+    loadThumb(img, url, wrap, wrap);
+  }
+
+  function loadBodyImages() {
+    document.querySelectorAll('#postlist .t_f img, #postlist .pcb img, #postlist .message img')
+      .forEach(registerBodyImage);
+  }
+
   // 详情页：掐掉站点自己的滚动补图。折叠楼层是滚动/交互时才插图，补个观察者兜底
   function disableSiteLazyLoad() {
     let fixed = 0;
@@ -1159,6 +1192,8 @@
     });
     if (fixed) log(`正文图：${fixed} 张从占位符换成真地址/打上 lazyloaded`);
 
+    loadBodyImages();
+
     const postlist = document.getElementById('postlist');
     if (!postlist || postlist.__sehuaImgObserver) return;
     const observer = new MutationObserver(mutations => {
@@ -1166,10 +1201,12 @@
       mutations.forEach(m => m.addedNodes.forEach(node => {
         if (node.nodeType !== 1) return;
         if (node.matches && node.matches('img[file]') && fixLazyImg(node)) added++;
+        if (node.matches) registerBodyImage(node);
         if (node.querySelectorAll) {
           node.querySelectorAll('img[file]').forEach(img => {
             if (fixLazyImg(img)) added++;
           });
+          node.querySelectorAll('img').forEach(registerBodyImage);
         }
       }));
       if (added) log(`正文图（新增节点）：${added} 张补齐`);
@@ -1185,7 +1222,7 @@
       return;
     }
     addStyle(`
-      ${PAGE_CSS}
+      ${PAGE_CSS}${DETAIL_CSS}
       #postlist { width: 100% !important; }
       #postlist ignore_js_op { text-align: center; }
       #postlist ignore_js_op img.zoom { display: block; margin-left: auto; margin-right: auto; }
