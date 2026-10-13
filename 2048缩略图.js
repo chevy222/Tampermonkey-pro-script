@@ -3,7 +3,7 @@
 // @namespace    https://fby.hfz300.com/
 // @version      3.8
 // @description  打开页面即全量预加载全部图片：滑动窗口控制并发（全局 + 单域名分池）、失败自动重试与死图床熔断、右下角常驻加载进度。不监听滚动，滚动不触发任何加载。附带去广告、隐藏侧栏、图床 preconnect、跨域图 no-referrer、节点复用自动重试；失败图压暗 + ↻ 角标/点击手动重试（赦免失败记忆）；迟到 load 回收。加载引擎与「色花堂缩略图」同构：imgQueue/imgInFlight/loadThumb/done/trackHostResult。<picture>/srcset 图不接管；广告块先清后扫。
-// 失败记忆分三层，互相独立：t2048BadImages（硬失败单图，TTL 5min）、t2048SlowImages（超时单图，TTL 60s）、t2048DeadHosts（图床，仅本次页面加载内作为熔断闸门，跨刷新不拦）。要恢复尝试：清掉 t2048BadImages + t2048SlowImages 后刷新即可。
+// 失败记忆：t2048BadImages（硬失败单图 + 判死的图床，TTL 5min）与 t2048SlowImages（超时单图，TTL 60s）。要恢复尝试：清掉这两个键后刷新即可。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
 // @noframes
@@ -50,16 +50,16 @@
     const PER_HOST_IN_FLIGHT = 6;
 
     // ============ 失败记忆（localStorage） ============
-    // 记住加载失败的图和死图床，刷新页面后直接跳过，不再重复重试
+    // 记住加载失败的图与判死的图床，刷新页面后直接跳过，不再重复重试。
+    // 图床以 HOST_KEY_PREFIX + origin 的形式和图片共用同一张表，
+    // 因此清掉 BAD_IMAGE_KEY 会把图级与图床级记忆一起清掉
     const BAD_IMAGE_KEY = 't2048BadImages';
-    const BAD_IMAGE_TTL = 5 * 60 * 1000;      // 硬失败（404 / 连接被拒）的单张图记忆时长
+    const BAD_IMAGE_TTL = 5 * 60 * 1000;      // 硬失败（404 / 连接被拒）的记忆时长
     const BAD_IMAGE_MAX = 300;
+    const HOST_KEY_PREFIX = '#host#';
     const SLOW_IMAGE_KEY = 't2048SlowImages';
     const SLOW_IMAGE_TTL = 60 * 1000;         // 超时（只是慢）的单张图记忆时长
     const SLOW_IMAGE_MAX = 300;
-    const DEAD_HOST_KEY = 't2048DeadHosts';
-    const DEAD_HOST_TTL = 10 * 60 * 1000;     // 判死的图床记忆时长
-    const DEAD_HOST_MAX = 16;
     const IMG_HOST_KEY = 't2048ImgHosts';     // 见过的图床域名，供下次 document-start 抢先握手
     const IMG_HOST_MAX = 4;
 
@@ -109,7 +109,6 @@
     const badImageStamps = {};
     const slowImages = new Set();
     const slowImageStamps = {};
-    const deadHostStamps = {};
 
     function writeStampTable(key, table) {
         try { localStorage.setItem(key, JSON.stringify(table)); } catch (e) {}
@@ -168,32 +167,27 @@
         }
     }
 
+    // 图床在失败表里的键：与图片共用一张表，故清 BAD_IMAGE_KEY 即同时赦免图床
+    function hostKey(origin) { return HOST_KEY_PREFIX + origin; }
+    function isDeadHost(origin) { return !!origin && badImages.has(hostKey(origin)); }
+
     function rememberDeadHost(origin) {
         if (!origin) return;
-        deadHostStamps[origin] = Date.now();
-        deadHosts.add(origin);
-        trimStamps(deadHostStamps, deadHosts, DEAD_HOST_MAX, DEAD_HOST_KEY);
+        rememberBadImage(hostKey(origin));
         dropPreconnectHost(origin);
     }
 
     // 图床恢复可用时立刻忘掉它
     function forgetHost(origin) {
-        if (!deadHosts.has(origin)) return;
-        deadHosts.delete(origin);
-        delete deadHostStamps[origin];
-        writeStampTable(DEAD_HOST_KEY, deadHostStamps);
+        if (!origin) return;
+        forgetImage(hostKey(origin));
     }
 
-    // 启动时把 TTL 内的失败记录读回来。
-    // 图床记忆（t2048DeadHosts）只做 TTL 清理与落盘，**不恢复成内存闸门**：
-    // 跨刷新一律由图级表（badImages/slowImages）拦，保证用户清掉图级表后一定能恢复尝试；
-    // 同一次页面加载内的熔断仍由内存态 deadHosts 负责（trackHostResult 写入）。
+    // 启动时把 TTL 内的失败记录读回来（图级与图床级在同一张表里，一并恢复）
     function loadFailureMemory() {
         const bad = readStampTable(BAD_IMAGE_KEY, BAD_IMAGE_TTL);
         Object.assign(badImageStamps, bad);
         Object.keys(bad).forEach(k => badImages.add(k));
-
-        readStampTable(DEAD_HOST_KEY, DEAD_HOST_TTL);
 
         const slow = readStampTable(SLOW_IMAGE_KEY, SLOW_IMAGE_TTL);
         Object.assign(slowImageStamps, slow);
@@ -218,7 +212,7 @@
         const cur = readHostList();
         if (cur[0] === origin) return;
         const next = [origin].concat(cur.filter(h => h !== origin))
-                           .filter(h => !deadHosts.has(h));
+                           .filter(h => !isDeadHost(h));
         writeHostList(next);
     }
 
@@ -245,7 +239,7 @@
     }
 
     function preconnectHost(origin) {
-        if (!origin || preconnectedHosts[origin] || deadHosts.has(origin)) return;
+        if (!origin || preconnectedHosts[origin] || isDeadHost(origin)) return;
         preconnectedHosts[origin] = true;
         insertPreconnect(origin, 0);
     }
@@ -359,7 +353,6 @@
     // 图床健康度：连续硬失败判死；任一成功即清零解封；超时另用更宽的阈值也判死
     const hostFailStreak = new Map();
     const hostTimeoutStreak = new Map();
-    const deadHosts = new Set();
 
     // 每个域名的在途计数，配合 PER_HOST_IN_FLIGHT 做分池限流
     const inFlightByHost = new Map();
@@ -482,7 +475,7 @@
                 img._heldHost = origin;
                 inFlightByHost.set(origin, (inFlightByHost.get(origin) || 0) + 1);
                 if (attempt === 0) startedAt = performance.now();
-                if (!manual && deadHosts.has(origin)) { done(true, 'skip'); return; }
+                if (!manual && isDeadHost(origin)) { done(true, 'skip'); return; }
                 const nextUrl = attemptUrl(url, attempt, refetch);
                 // 只有地址真的变了才赋值：对同一 URL 重新赋值会取消浏览器在途/排队的请求
                 if (img.getAttribute('src') !== nextUrl) setImgSrc(img, nextUrl);
@@ -549,9 +542,7 @@
 
         if (count) thumbProgress.add(1);
         // 命中图级失败记忆：直接跳过（manual 模式已在 manualRetry 里赦免，强行放行）
-        // 注意这里不查 deadHosts：图床闸门只负责「本次页面加载内」不再重复试探，
-        // 跨刷新一律靠图级表。这样用户清掉 t2048BadImages 就一定能恢复尝试，
-        // 不会出现「清了 t2048BadImages 却还被 t2048DeadHosts 挡住」的困惑。
+        // 图床记忆已并入图级表，这里只需查图级表
         if (!manual && (badImages.has(url) || slowImages.has(url))) {
             log('命中失败记忆，跳过:', url);
             done(true, 'skip');

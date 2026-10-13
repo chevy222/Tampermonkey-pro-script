@@ -3,7 +3,7 @@
 // @namespace    http://98tang.com/
 // @version      3.10
 // @description  PC列表页从移动版触屏模板取缩略图，页面打开时一次性全部加载（无懒加载、无滚动触发、无按需加载），宽屏单列布局 + 加载进度提示 + 失败自动重试；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新；失败图压暗留位 + 角标 ↻ 手动重试；双注入防护；迟到 load 回收。
-// 失败记忆分三层，互相独立：sehuaBadImages（硬失败单图，TTL 5min）、sehuaSlowImages（超时单图，TTL 60s）、sehuaDeadHosts（图床，仅本次页面加载内作为熔断闸门，跨刷新不拦）。要恢复尝试：清掉 sehuaBadImages + sehuaSlowImages 后刷新即可。
+// 失败记忆：sehuaBadImages（硬失败单图 + 判死的图床，TTL 5min）与 sehuaSlowImages（超时单图，TTL 60s）。要恢复尝试：清掉这两个键后刷新即可。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
 // @connect      bhagq.4yl7j.com
@@ -76,12 +76,10 @@
   const BAD_IMAGE_KEY = 'sehuaBadImages';
   const BAD_IMAGE_TTL = 5 * 60 * 1000;     // 硬失败单图的记忆时长
   const BAD_IMAGE_MAX = 300;
+  const HOST_KEY_PREFIX = '#host#';
   const SLOW_IMAGE_KEY = 'sehuaSlowImages';
   const SLOW_IMAGE_TTL = 60 * 1000;        // 超时（弱证据）的记忆时长
   const SLOW_IMAGE_MAX = 300;
-  const DEAD_HOST_KEY = 'sehuaDeadHosts';
-  const DEAD_HOST_TTL = 10 * 60 * 1000;    // 判死图床的记忆时长
-  const DEAD_HOST_MAX = 16;
 
   // 同时在途的缩略图请求数上限（0 = 不限制）——这是全局总闸
   const MAX_IMG_IN_FLIGHT = 16;
@@ -322,7 +320,7 @@
   // 挂一条 preconnect
   function preconnectHost(origin, tries = 0) {
     if (!origin || origin === location.origin) return;
-    if (deadHosts.has(origin)) return;
+    if (isDeadHost(origin)) return;
     const parent = document.head || document.documentElement;
     if (!parent) {
       if (tries < 10) setTimeout(() => preconnectHost(origin, tries + 1), 20);
@@ -349,7 +347,7 @@
     hosts.forEach(h => preconnectHost(h));
     try {
       const prev = JSON.parse(localStorage.getItem(IMG_HOST_KEY) || '[]');
-      const merged = [...new Set([...hosts, ...prev])].filter(h => !deadHosts.has(h));
+      const merged = [...new Set([...hosts, ...prev])].filter(h => !isDeadHost(h));
       localStorage.setItem(IMG_HOST_KEY, JSON.stringify(merged.slice(0, IMG_HOST_MAX)));
     } catch (e) {}
   }
@@ -544,17 +542,15 @@
   // 图床健康度
   const hostFailStreak = new Map();
   const hostTimeoutStreak = new Map();
-  const deadHosts = new Set();
 
   // 每个域名的在途计数，配合 PER_HOST_IN_FLIGHT 做分池限流
   const inFlightByHost = new Map();
 
-  // 失败记忆
+  // 失败记忆（图床以 HOST_KEY_PREFIX + origin 的形式与图片共用 badImages）
   const badImages = new Set();
   const badImageStamps = {};
   const slowImages = new Set();
   const slowImageStamps = {};
-  const deadHostStamps = {};
 
   // 读一张"名称 -> 时间戳"表，顺手清掉过期项
   function readStampTable(key, ttl) {
@@ -612,18 +608,19 @@
     }
   }
 
+  // 图床在失败表里的键：与图片共用一张表，故清 BAD_IMAGE_KEY 即同时赦免图床
+  function hostKey(origin) { return HOST_KEY_PREFIX + origin; }
+  function isDeadHost(origin) { return !!origin && badImages.has(hostKey(origin)); }
+
   // 图床恢复可用时立刻忘掉它
   function forgetHost(origin) {
-    if (!deadHosts.has(origin)) return;
-    deadHosts.delete(origin);
-    delete deadHostStamps[origin];
-    writeStampTable(DEAD_HOST_KEY, deadHostStamps);
+    if (!origin) return;
+    forgetImage(hostKey(origin));
   }
 
   function rememberDeadHost(origin) {
-    deadHostStamps[origin] = Date.now();
-    deadHosts.add(origin);
-    trimStamps(deadHostStamps, deadHosts, DEAD_HOST_MAX, DEAD_HOST_KEY);
+    if (!origin) return;
+    rememberBadImage(hostKey(origin));
     dropPreconnectHost(origin);
   }
 
@@ -636,17 +633,11 @@
     } catch (e) {}
   }
 
-  // 启动时把 TTL 内的失败记录读回来。
-  // 图床记忆（sehuaDeadHosts）只做 TTL 清理与落盘，**不恢复成内存闸门**：
-  // 跨刷新一律靠图级表（badImages/slowImages）拦，保证用户清掉图级表后一定能恢复尝试，
-  // 不会出现「清了 sehuaBadImages 却还被 sehuaDeadHosts 挡住」的困惑；
-  // 同一次页面加载内的熔断仍由内存态 deadHosts 负责（trackHostResult 写入）。
+  // 启动时把 TTL 内的失败记录读回来（图级与图床级在同一张表里，一并恢复）
   function loadFailureMemory() {
     const bad = readStampTable(BAD_IMAGE_KEY, BAD_IMAGE_TTL);
     Object.assign(badImageStamps, bad);
     Object.keys(bad).forEach(k => badImages.add(k));
-
-    readStampTable(DEAD_HOST_KEY, DEAD_HOST_TTL);
 
     const slow = readStampTable(SLOW_IMAGE_KEY, SLOW_IMAGE_TTL);
     Object.assign(slowImageStamps, slow);
@@ -774,7 +765,7 @@
         heldHost = origin;
         inFlightByHost.set(origin, (inFlightByHost.get(origin) || 0) + 1);
         if (attempt === 0) startedAt = performance.now();
-        if (!manual && deadHosts.has(origin)) { done(true, 'skip'); return; }
+        if (!manual && isDeadHost(origin)) { done(true, 'skip'); return; }
         const nextUrl = attemptUrl(url, attempt, refetch);
         // 只有地址真的变了才赋值：对同一 URL 重新赋值会取消浏览器在途/排队的请求
         if (img.getAttribute('src') !== nextUrl) setImgSrc(img, nextUrl);
@@ -840,8 +831,7 @@
 
     if (!manual) thumbProgress.add(1);
     // 命中图级失败记忆：直接跳过（manual 模式已在 manualRetry 里赦免，强行放行）
-    // 这里不查 deadHosts：图床闸门只负责「本次页面加载内」不再重复试探，跨刷新一律靠图级表，
-    // 这样用户清掉 sehuaBadImages 就一定能恢复尝试。
+    // 图床记忆已并入图级表，这里只需查图级表
     if (!manual && (badImages.has(url) || slowImages.has(url))) { done(true, 'skip'); return; }
     queueAttempt();
   }
