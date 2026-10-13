@@ -40,8 +40,9 @@
 
     // 同一图床连续硬失败这么多次即判不可达，该域名未开始的图直接跳过；任一成功即清零
     const HOST_FAIL_THRESHOLD = 3;
-    // 同一图床连续「超时」这么多次同样判不可达：挂住不回 = 不可用，只是证据弱，故阈值放宽
-    const HOST_TIMEOUT_THRESHOLD = 8;
+    // 同一图床连续「超时」这么多次同样判不可达；取值为一个并发窗口（PER_HOST_IN_FLIGHT），
+    // 使整窗同时挂住的场景在第一批即可熔断
+    const HOST_TIMEOUT_THRESHOLD = 6;
 
     // 单域名在途上限。Chrome 对同一 origin 的 HTTP/1.1 只给约 6 条连接，
     // 全局上限放任不管会让多余的请求滞留在浏览器 socket 队列里空等，
