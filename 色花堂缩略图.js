@@ -725,7 +725,8 @@
   // manual=true 为角标手动重试专用：不 add/settle（不动进度分母），强行绕过失败记忆发请求
   function loadThumb(img, url, anchor, wrap, manual = false) {
     const origin = imageOrigin(url);
-    let startedAt = 0;
+    let startedAt = 0;    // 本次请求真正发出的时刻（在途计时起点）
+    let waitUsed = 0;     // 跨重试累计的在途等待毫秒；冷却/排队/退避不计入
     let attempt = 0;
     let settled = false;
     let failedFlag = false;
@@ -805,35 +806,38 @@
         imgInFlight++;
         holding = true;
         heldHost = origin;
-        inFlightByHost.set(origin, (inFlightByHost.get(origin) || 0) + 1);
-        if (attempt === 0) startedAt = performance.now();
-        if (!manual) {
-          // 图床冷却中：整批往后挪，等冷却结束再试，不计失败也不占槽位
-          const wait = hostCooldownWait(origin);
-          if (wait > 0) { reQueueAfter(wait); return; }
-          if (hostGaveUp(origin)) { done(true, 'skip'); return; }
-        }
-        const nextUrl = attemptUrl(url, attempt, refetch);
-        // 只有地址真的变了才赋值：对同一 URL 重新赋值会取消浏览器在途/排队的请求
-        if (img.getAttribute('src') !== nextUrl) setImgSrc(img, nextUrl);
-        // 命中缓存时直接结算
-        if (img.complete) {
-          const ok = img.naturalWidth > 0;
-          done(!ok, ok ? 'ok' : 'cached-hard');
-          return;
-        }
-        armWait();
+                inFlightByHost.set(origin, (inFlightByHost.get(origin) || 0) + 1);
+                if (!manual) {
+                    // 图床冷却中：整批往后挪，等冷却结束再试，不计失败也不占槽位
+                    const wait = hostCooldownWait(origin);
+                    if (wait > 0) { reQueueAfter(wait); return; }
+                    if (hostGaveUp(origin)) { done(true, 'skip'); return; }
+                }
+                const nextUrl = attemptUrl(url, attempt, refetch);
+                // 只有地址真的变了才赋值：对同一 URL 重新赋值会取消浏览器在途/排队的请求
+                if (img.getAttribute('src') !== nextUrl) setImgSrc(img, nextUrl);
+                // 命中缓存时直接结算
+                if (img.complete) {
+                    const ok = img.naturalWidth > 0;
+                    done(!ok, ok ? 'ok' : 'cached-hard');
+                    return;
+                }
+                // 总等待预算只累计「请求真正发出后」的在途时间：
+                // 冷却等待、重试退避、排队等窗口位都不计时。否则这些时间会先耗尽预算，
+                // 重新派发的图被秒判超时 → 超时喂熔断计数 → 再冷却 → 更多秒判，恶性循环
+                startedAt = performance.now();
+                armWait();
       };
       task._host = origin;   // pumpImgQueue 据此做域名分池
       imgQueue.push(task);
       pumpImgQueue();
     };
 
-    const armWait = () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => { if (!settled) onTimeout(); },
-        Math.max(0, IMG_TOTAL_WAIT_MS - (performance.now() - startedAt)));
-    };
+        const armWait = () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => { if (!settled) onTimeout(); },
+                Math.max(0, IMG_TOTAL_WAIT_MS - waitUsed));
+        };
 
     // 图床冷却期间把这次派发整体推迟，不结算也不占槽位
     const reQueueAfter = (wait) => {
@@ -841,21 +845,23 @@
       timer = setTimeout(() => { if (!settled) queueAttempt(); }, wait + 50);
     };
 
-    function retryLater(hard) {
-      attempt++;
-      refetch = hard;   // 只有「请求已经结束」的硬错误才换地址重发
-      releaseSlot();
-      const delay = IMG_RETRY_BASE_MS * attempt + Math.floor(Math.random() * 400);
-      timer = setTimeout(queueAttempt, delay);
-    }
+        function retryLater(hard) {
+            attempt++;
+            refetch = hard;   // 只有「请求已经结束」的硬错误才换地址重发
+            waitUsed += performance.now() - startedAt;   // 本次在途时长计入总预算，退避等待不计
+            releaseSlot();
+            const delay = IMG_RETRY_BASE_MS * attempt + Math.floor(Math.random() * 400);
+            timer = setTimeout(queueAttempt, delay);
+        }
 
-    function onTimeout() {
-      if (settled) return;
-      clearTimeout(timer);
-      // 超时按失败送进 done()，是否真的算失败由 done() 依据「有没有解出画面」判定；
-      // 不重发（重赋 src 会取消在途请求并重排队尾）
-      done(true, 'timeout');
-    }
+        function onTimeout() {
+            if (settled) return;
+            clearTimeout(timer);
+            waitUsed += performance.now() - startedAt;
+            // 超时按失败送进 done()，是否真的算失败由 done() 依据「有没有解出画面」判定；
+            // 不重发（重赋 src 会取消在途请求并重排队尾）
+            done(true, 'timeout');
+        }
 
     function onError() {
       if (settled) return;
