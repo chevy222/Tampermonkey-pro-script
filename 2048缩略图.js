@@ -3,7 +3,6 @@
 // @namespace    https://fby.hfz300.com/
 // @version      3.16
 // @description  打开页面即全量预加载全部图片：滑动窗口控制并发（全局 + 单域名分池）、失败自动重试与死图床熔断、右下角常驻加载进度。不监听滚动，滚动不触发任何加载。附带去广告（含打赏卡）、隐藏侧栏、图床 preconnect、跨域图 no-referrer、节点复用自动重试；失败图压暗 + ↻ 角标/点击手动重试（赦免失败记忆）；迟到回收改持续轮询，且回收时同步赦免失败记忆。单图总等待预算只计在途时间（冷却/排队/退避不计时），timeout 熔断不写判死记忆，慢图床免于持久拉黑。<picture>/srcset 图不接管；广告块先清后扫。
-// 失败记忆 t2048BadImages：硬失败的单图与判死的图床共用一张表（TTL 5min）。要恢复尝试：清掉该键后刷新即可。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
 // @noframes
