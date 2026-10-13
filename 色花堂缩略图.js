@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂缩略图
 // @namespace    http://98tang.com/
-// @version      3.10
+// @version      3.11
 // @description  PC列表页从移动版触屏模板取缩略图，页面打开时一次性全部加载（无懒加载、无滚动触发、无按需加载），宽屏单列布局 + 加载进度提示 + 失败自动重试；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新；失败图压暗留位 + 角标 ↻ 手动重试；双注入防护；迟到 load 回收。
 // 失败记忆 sehuaBadImages：硬失败的单图与判死的图床共用一张表（TTL 5min）。要恢复尝试：清掉该键后刷新即可。
 // @author       Chevy Yang
@@ -19,7 +19,7 @@
 
   // 版本号，document-start 阶段写到 <html data-sehua="..."> 上（兼作双注入哨兵）
   // 必须与文件头 @version 保持一致，否则哨兵值与声明版本对不上，排障时会误判
-  const VERSION = '3.10';
+  const VERSION = '3.11';
 
   // 防双注入（Tampermonkey 装重 / 多渠道注入）：先占位，后到的实例原路退出
   if (document.documentElement.getAttribute('data-sehua')) return;
