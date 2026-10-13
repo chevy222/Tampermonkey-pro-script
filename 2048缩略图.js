@@ -285,14 +285,12 @@
             if (failed) this.failed++;
             this.render();
             if (this.settled >= this.total) {
-                // render() 已经安排了「淡出 → 400ms 后 el.remove()」，这里不能再动 this.timer：
-                // 原先的 clearTimeout + 换成 hide() 会取消那个移除定时器，
-                // 导致胶囊以 opacity:0 永久常驻 DOM。
+                // render() 已安排「淡出 → 移除」，此处只在其未安排时兜底
                 if (!this.timer) this.timer = setTimeout(() => this.hide(), PROGRESS_HIDE_DELAY_MS);
             }
         },
 
-        // 手动重试成功 / 迟到 load 回收：只把之前那次失败减回去，total/settled 都不动
+        // 手动重试成功 / 迟到 load 回收：把已计入的失败数撤回一次，total/settled 都不动
         revive() {
             if (this.failed > 0) this.failed--;
             this.render();

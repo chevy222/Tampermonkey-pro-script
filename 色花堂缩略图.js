@@ -503,7 +503,7 @@
       }
     },
 
-    // 手动重试成功：只把之前那次失败减回去，total/settled 都不动（分母不能被顶大）
+    // 手动重试成功：把已计入的失败数撤回一次，total/settled 都不动（分母不能被顶大）
     revive() {
       if (this.failed > 0) this.failed--;
       this.render();
@@ -698,9 +698,7 @@
     return `calc((100% - ${(count - 1) * THUMB_GAP_PX}px) / ${count})`;
   }
 
-  // 只有在「上一次请求已经结束」的硬错误重试时才换地址破缓存。
-  // 超时重试绝不能换地址、也不能重赋同值：那会取消浏览器仍在排队/在途的那次请求，
-  // 把它重新排到队尾，越重试越慢（实测同一图床 16 张图互相踩踏即源于此）。
+  // refetch 为真（硬错误重试）时才加参数破缓存；超时重试沿用原地址
   function attemptUrl(url, attempt, refetch) {
     if (!refetch) return url;
     return url + (url.indexOf('?') === -1 ? '?' : '&') + '_r=' + Date.now() + attempt;
