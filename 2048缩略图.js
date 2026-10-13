@@ -3,7 +3,7 @@
 // @namespace    https://fby.hfz300.com/
 // @version      3.8
 // @description  打开页面即全量预加载全部图片：滑动窗口控制并发（全局 + 单域名分池）、失败自动重试与死图床熔断、右下角常驻加载进度。不监听滚动，滚动不触发任何加载。附带去广告、隐藏侧栏、图床 preconnect、跨域图 no-referrer、节点复用自动重试；失败图压暗 + ↻ 角标/点击手动重试（赦免失败记忆）；迟到 load 回收。加载引擎与「色花堂缩略图」同构：imgQueue/imgInFlight/loadThumb/done/trackHostResult。<picture>/srcset 图不接管；广告块先清后扫。
-// 失败记忆：t2048BadImages（硬失败单图 + 判死的图床，TTL 5min）与 t2048SlowImages（超时单图，TTL 60s）。要恢复尝试：清掉这两个键后刷新即可。
+// 失败记忆 t2048BadImages：硬失败的单图与判死的图床共用一张表（TTL 5min）。要恢复尝试：清掉该键后刷新即可。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
 // @noframes
@@ -57,9 +57,6 @@
     const BAD_IMAGE_TTL = 5 * 60 * 1000;      // 硬失败（404 / 连接被拒）的记忆时长
     const BAD_IMAGE_MAX = 300;
     const HOST_KEY_PREFIX = '#host#';
-    const SLOW_IMAGE_KEY = 't2048SlowImages';
-    const SLOW_IMAGE_TTL = 60 * 1000;         // 超时（只是慢）的单张图记忆时长
-    const SLOW_IMAGE_MAX = 300;
     const IMG_HOST_KEY = 't2048ImgHosts';     // 见过的图床域名，供下次 document-start 抢先握手
     const IMG_HOST_MAX = 4;
 
@@ -107,8 +104,6 @@
 
     const badImages = new Set();
     const badImageStamps = {};
-    const slowImages = new Set();
-    const slowImageStamps = {};
 
     function writeStampTable(key, table) {
         try { localStorage.setItem(key, JSON.stringify(table)); } catch (e) {}
@@ -142,29 +137,19 @@
         writeStampTable(key, stamps);
     }
 
-    // soft=true 表示这次失败只是超时/慢，进短 TTL 的表；否则按硬失败记 5 分钟
-    function rememberBadImage(url, soft) {
+    // 记一次硬失败（含被熔断跳过与判死的图床）
+    function rememberBadImage(url) {
         if (!url) return;
-        if (soft) {
-            slowImageStamps[url] = Date.now();
-            slowImages.add(url);
-            trimStamps(slowImageStamps, slowImages, SLOW_IMAGE_MAX, SLOW_IMAGE_KEY);
-        } else {
-            badImageStamps[url] = Date.now();
-            badImages.add(url);
-            trimStamps(badImageStamps, badImages, BAD_IMAGE_MAX, BAD_IMAGE_KEY);
-        }
+        badImageStamps[url] = Date.now();
+        badImages.add(url);
+        trimStamps(badImageStamps, badImages, BAD_IMAGE_MAX, BAD_IMAGE_KEY);
     }
 
-    // 手动重试前的"赦免"：把某张图从两张表里除名并落盘
+    // 手动重试前的"赦免"：把某张图（或图床键）从表里除名并落盘
     function forgetImage(url) {
-        let dirty = false;
-        if (badImages.delete(url)) { delete badImageStamps[url]; dirty = true; }
-        if (slowImages.delete(url)) { delete slowImageStamps[url]; dirty = true; }
-        if (dirty) {
-            writeStampTable(BAD_IMAGE_KEY, badImageStamps);
-            writeStampTable(SLOW_IMAGE_KEY, slowImageStamps);
-        }
+        if (!badImages.delete(url)) return;
+        delete badImageStamps[url];
+        writeStampTable(BAD_IMAGE_KEY, badImageStamps);
     }
 
     // 图床在失败表里的键：与图片共用一张表，故清 BAD_IMAGE_KEY 即同时赦免图床
@@ -188,10 +173,6 @@
         const bad = readStampTable(BAD_IMAGE_KEY, BAD_IMAGE_TTL);
         Object.assign(badImageStamps, bad);
         Object.keys(bad).forEach(k => badImages.add(k));
-
-        const slow = readStampTable(SLOW_IMAGE_KEY, SLOW_IMAGE_TTL);
-        Object.assign(slowImageStamps, slow);
-        Object.keys(slow).forEach(k => slowImages.add(k));
     }
 
     /* -------- 已见过的图床域名：供下次 document-start 抢先握手 -------- */
@@ -442,7 +423,7 @@
 
             if (!failed) trackHostResult(origin, 'ok');
             else if (outcome === 'hard') { rememberBadImage(url); trackHostResult(origin, 'hard'); }
-            else if (outcome === 'timeout') { rememberBadImage(url, true); trackHostResult(origin, 'timeout'); }
+            else if (outcome === 'timeout') trackHostResult(origin, 'timeout');
             else if (outcome === 'cached-hard') rememberBadImage(url);
             // 被图床熔断跳过的图也要进图级表：否则图级记忆与图床记忆脱节，
             // 用户清 t2048BadImages 时这些图根本没有条目，清了也看不出变化
@@ -543,7 +524,7 @@
         if (count) thumbProgress.add(1);
         // 命中图级失败记忆：直接跳过（manual 模式已在 manualRetry 里赦免，强行放行）
         // 图床记忆已并入图级表，这里只需查图级表
-        if (!manual && (badImages.has(url) || slowImages.has(url))) {
+        if (!manual && badImages.has(url)) {
             log('命中失败记忆，跳过:', url);
             done(true, 'skip');
             return;
@@ -732,7 +713,7 @@
     function processAdded(node) {
         if (node.nodeType !== 1) return;
         // 先清广告再扫图：否则广告块里的图会被登记（total++/入队）后整块删掉，
-        // 20s 超时才结算，还被误记进 slowImages
+        // 既顶大进度分母，又要等超时才结算
         removeMatching(node);
         if (!node.isConnected) return;   // 节点自身就是广告块，刚被摘掉
         sweep(node);

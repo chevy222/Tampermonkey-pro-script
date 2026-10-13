@@ -3,7 +3,7 @@
 // @namespace    http://98tang.com/
 // @version      3.10
 // @description  PC列表页从移动版触屏模板取缩略图，页面打开时一次性全部加载（无懒加载、无滚动触发、无按需加载），宽屏单列布局 + 加载进度提示 + 失败自动重试；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新；失败图压暗留位 + 角标 ↻ 手动重试；双注入防护；迟到 load 回收。
-// 失败记忆：sehuaBadImages（硬失败单图 + 判死的图床，TTL 5min）与 sehuaSlowImages（超时单图，TTL 60s）。要恢复尝试：清掉这两个键后刷新即可。
+// 失败记忆 sehuaBadImages：硬失败的单图与判死的图床共用一张表（TTL 5min）。要恢复尝试：清掉该键后刷新即可。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
 // @connect      bhagq.4yl7j.com
@@ -40,8 +40,9 @@
   // 从详情页回捞时单帖最多取几张图
   const MAX_DETAIL_IMGS = 5;
 
-  // 每个帖子最多注入几张缩略图
-  const MAX_THUMBS_PER_POST = 5;
+  // 每个帖子最多注入几张缩略图。移动版提供的地址没有尺寸变体，
+  // 本项直接决定单页流量，是预览完整度与流量之间的主要取舍点
+  const MAX_THUMBS_PER_POST = 2;
 
   // 移动版映射请求失败后的重试次数与退避间隔
   const MOBILE_RETRY_TIMES = 2;
@@ -77,9 +78,6 @@
   const BAD_IMAGE_TTL = 5 * 60 * 1000;     // 硬失败单图的记忆时长
   const BAD_IMAGE_MAX = 300;
   const HOST_KEY_PREFIX = '#host#';
-  const SLOW_IMAGE_KEY = 'sehuaSlowImages';
-  const SLOW_IMAGE_TTL = 60 * 1000;        // 超时（弱证据）的记忆时长
-  const SLOW_IMAGE_MAX = 300;
 
   // 同时在途的缩略图请求数上限（0 = 不限制）——这是全局总闸
   const MAX_IMG_IN_FLIGHT = 16;
@@ -88,12 +86,6 @@
   // 全局 16 会让多余的请求滞留在浏览器 socket 队列里空等，而脚本的等待计时照跑，
   // 于是未真正发出的请求被误判超时 → 重试 → 更堵。按域名分池才是真实可控的并发。
   const PER_HOST_IN_FLIGHT = 6;
-
-  // 首屏判定余量
-  const FOLD_SLACK_PX = 120;
-
-  // 非首屏缩略图的加载优先级
-  const BELOW_FOLD_PRIORITY = 'auto';
 
   // 缩略图之间的间距
   const THUMB_GAP_PX = 8;
@@ -549,8 +541,6 @@
   // 失败记忆（图床以 HOST_KEY_PREFIX + origin 的形式与图片共用 badImages）
   const badImages = new Set();
   const badImageStamps = {};
-  const slowImages = new Set();
-  const slowImageStamps = {};
 
   // 读一张"名称 -> 时间戳"表，顺手清掉过期项
   function readStampTable(key, ttl) {
@@ -583,29 +573,20 @@
     writeStampTable(key, stamps);
   }
 
-  // soft=true 表示只是超时/慢，用短 TTL 的表；否则按硬失败记 5 分钟
-  function rememberBadImage(url, soft) {
-    if (soft) {
-      slowImageStamps[url] = Date.now();
-      slowImages.add(url);
-      trimStamps(slowImageStamps, slowImages, SLOW_IMAGE_MAX, SLOW_IMAGE_KEY);
-      return;
-    }
+  // 记一次硬失败（含被熔断跳过与判死的图床）
+  function rememberBadImage(url) {
+    if (!url) return;
     badImageStamps[url] = Date.now();
     badImages.add(url);
     trimStamps(badImageStamps, badImages, BAD_IMAGE_MAX, BAD_IMAGE_KEY);
   }
 
-  // 手动重试前的"赦免"：把某张图从硬失败/超时两张表里除名并落盘，
+  // 手动重试前的"赦免"：把某张图（或图床键）从表里除名并落盘，
   // 否则重试一进门就会被 loadThumb 行内的记忆检查自己挡回来
   function forgetImage(url) {
-    let dirty = false;
-    if (badImages.delete(url)) { delete badImageStamps[url]; dirty = true; }
-    if (slowImages.delete(url)) { delete slowImageStamps[url]; dirty = true; }
-    if (dirty) {
-      writeStampTable(BAD_IMAGE_KEY, badImageStamps);
-      writeStampTable(SLOW_IMAGE_KEY, slowImageStamps);
-    }
+    if (!badImages.delete(url)) return;
+    delete badImageStamps[url];
+    writeStampTable(BAD_IMAGE_KEY, badImageStamps);
   }
 
   // 图床在失败表里的键：与图片共用一张表，故清 BAD_IMAGE_KEY 即同时赦免图床
@@ -638,10 +619,6 @@
     const bad = readStampTable(BAD_IMAGE_KEY, BAD_IMAGE_TTL);
     Object.assign(badImageStamps, bad);
     Object.keys(bad).forEach(k => badImages.add(k));
-
-    const slow = readStampTable(SLOW_IMAGE_KEY, SLOW_IMAGE_TTL);
-    Object.assign(slowImageStamps, slow);
-    Object.keys(slow).forEach(k => slowImages.add(k));
   }
 
   function imageOrigin(url) {
@@ -732,7 +709,7 @@
 
       if (!failed) trackHostResult(origin, 'ok');
       else if (outcome === 'hard') { rememberBadImage(url); trackHostResult(origin, 'hard'); }
-      else if (outcome === 'timeout') { rememberBadImage(url, true); trackHostResult(origin, 'timeout'); }
+      else if (outcome === 'timeout') trackHostResult(origin, 'timeout');
       else if (outcome === 'cached-hard') rememberBadImage(url);
       // 被图床熔断跳过的图也要进图级表：否则图级记忆与图床记忆脱节，
       // 用户清 sehuaBadImages 时这些图根本没有条目，清了也看不出变化
@@ -832,7 +809,7 @@
     if (!manual) thumbProgress.add(1);
     // 命中图级失败记忆：直接跳过（manual 模式已在 manualRetry 里赦免，强行放行）
     // 图床记忆已并入图级表，这里只需查图级表
-    if (!manual && (badImages.has(url) || slowImages.has(url))) { done(true, 'skip'); return; }
+    if (!manual && badImages.has(url)) { done(true, 'skip'); return; }
     queueAttempt();
   }
 
@@ -876,22 +853,20 @@
   }
 
   // 建缩略图容器并同步开始加载全部图片
-  function createThumbWrap(tid, urls, highPriority) {
+  function createThumbWrap(tid, urls) {
     const wrap = document.createElement('div');
     wrap.className = 'sehua-thumb';
     const shown = urls.slice(0, MAX_THUMBS_PER_POST);
     wrap.style.setProperty('--img-width', thumbWidthRule(shown.length));
     const href = `https://${location.hostname}/thread-${tid}-1-1.html`;
 
-    shown.forEach((url, idx) => {
+    shown.forEach((url) => {
       const anchor = document.createElement('a');
       anchor.href = href;
       anchor.target = '_blank';
 
       const img = document.createElement('img');
       img.decoding = 'async';
-      img.loading = 'eager';
-      img.fetchPriority = (highPriority && idx === 0) ? 'high' : BELOW_FOLD_PRIORITY;
 
       anchor.appendChild(img);
       wrap.appendChild(anchor);
@@ -902,18 +877,13 @@
     return wrap;
   }
 
-  // 行顶距视口底部在 FOLD_SLACK_PX 内即视为首屏
-  function isAboveFold(tbody) {
-    return !!tbody && tbody.getBoundingClientRect().top < window.innerHeight + FOLD_SLACK_PX;
-  }
-
   // 往一个帖子行注入缩略图
-  function injectThumb(tr, thumbMap, highPriority) {
+  function injectThumb(tr, thumbMap) {
     const th = tr.querySelector('th');
     const tbody = tr.closest('tbody');
     const tid = tbody && tbody.id ? (tbody.id.match(/\d+/) || [])[0] : null;
     if (tid && thumbMap[tid] && th && !th.querySelector('.sehua-thumb')) {
-      th.appendChild(createThumbWrap(tid, thumbMap[tid], highPriority));
+      th.appendChild(createThumbWrap(tid, thumbMap[tid]));
     }
   }
 
@@ -921,7 +891,6 @@
   function processRow(tr, thumbMap) {
     if (!tr.closest('tbody[id^=normalthread_], tbody[id^=stickthread_]')) return;
     const th = tr.querySelector('th');
-    const tbody = tr.closest('tbody');
     const firstBy = tr.querySelector('td.by');
 
     // 把发帖时间从 td.by 挪到标题下方
@@ -939,12 +908,12 @@
       }
     }
 
-    injectThumb(tr, thumbMap, isAboveFold(tbody));
+    injectThumb(tr, thumbMap);
     tr.querySelectorAll('td').forEach(td => td.remove());
   }
 
   function processTable(thumbMap) {
-    let injected = 0, moved = 0, high = 0;
+    let injected = 0, moved = 0;
     document.querySelectorAll('#threadlisttableid tr').forEach(tr => {
       const th = tr.querySelector('th');
       const hadThumb = !!(th && th.querySelector('.sehua-thumb'));
@@ -952,13 +921,10 @@
 
       processRow(tr, thumbMap);
 
-      if (!hadThumb && th && th.querySelector('.sehua-thumb')) {
-        injected++;
-        high += th.querySelectorAll('.sehua-thumb img[fetchpriority="high"]').length;
-      }
+      if (!hadThumb && th && th.querySelector('.sehua-thumb')) injected++;
       if (!hadDate && th && th.querySelector('.tps em, .sehua-date em')) moved++;
     });
-    log(`注入 ${injected} 个帖子的缩略图（${high} 张首屏图用 high 优先级），搬移 ${moved} 个日期`);
+    log(`注入 ${injected} 个帖子的缩略图，搬移 ${moved} 个日期`);
   }
 
   // 把分页按钮还原成普通链接（点击即整页跳转）
@@ -972,10 +938,10 @@
   }
 
   // 详情图到手后的统一收尾：预连接图床 + 注入缩略图
-  function attachDetailThumbs(container, foldEl, tid, urls) {
+  function attachDetailThumbs(container, tid, urls) {
     preconnectUrlList(urls);
     if (urls.length === 0 || container.querySelector('.sehua-thumb')) return;
-    container.appendChild(createThumbWrap(tid, urls, isAboveFold(foldEl)));
+    container.appendChild(createThumbWrap(tid, urls));
   }
 
   // 移动版没给出缩略图的帖子，逐个回详情页取
@@ -987,7 +953,7 @@
       if (!tid || !th || th.querySelector('.sehua-thumb')) return;
       const urls = await fetchDetailImages(tid);
       if (urls === null) return;
-      attachDetailThumbs(th, tb, tid, urls);
+      attachDetailThumbs(th, tid, urls);
     }));
     await Promise.all(tasks);
   }
@@ -1083,7 +1049,7 @@
           loading.remove();
           if (urls === null) return;
           li.dataset.sehuaChecked = '1';
-          attachDetailThumbs(li, li, tid, urls);
+          attachDetailThumbs(li, tid, urls);
         } catch (e) {
           loading.remove();
         }
