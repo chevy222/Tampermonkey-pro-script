@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048缩略图
 // @namespace    https://fby.hfz300.com/
-// @version      3.7
+// @version      3.8
 // @description  打开页面即全量预加载全部图片：滑动窗口控制并发、失败自动重试与死图床熔断、右下角常驻加载进度。不监听滚动，滚动不触发任何加载。附带去广告、隐藏侧栏、图床 preconnect、跨域图 no-referrer、节点复用自动重试；失败图压暗 + ↻ 角标/点击手动重试（赦免失败记忆）；迟到 load 回收。加载引擎与「色花堂缩略图」同构：imgQueue/imgInFlight/loadThumb/done/trackHostResult。<picture>/srcset 图不接管；广告块先清后扫。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
@@ -14,6 +14,14 @@
     'use strict';
 
     /* ============================== 可调参数 ============================== */
+
+    // 版本号，document-start 阶段写到 <html data-t2048="..."> 上（兼作双注入哨兵）
+    const VERSION = '3.8';
+
+    // 防双注入（Tampermonkey 装重 / 多渠道注入）：先占位，后到的实例原路退出。
+    // 两个实例的 observer 会互相 resetImage 涨 _gen，把对方的加载闭包全部短路，图永远不结算
+    if (document.documentElement.getAttribute('data-t2048')) return;
+    document.documentElement.setAttribute('data-t2048', VERSION);
 
     // 运行日志开关（排查时改成 true）
     const DEBUG = false;
