@@ -29,7 +29,10 @@
     const log = (...args) => { if (DEBUG) console.log('[2048缩略图]', ...args); };
 
     // 同时在途的图片请求数上限（0 = 不限制）
-    const MAX_IMG_IN_FLIGHT = 8;
+    // 16：检索页常见 10+ 个图床，若只给 8，单域上限 6 的一个大图床就占掉 6 席，
+    // 其余图床只能抢 2 席——整页吞吐被锁死，饥饿图床还会攒超时误触熔断。
+    // 真实并发仍由 PER_HOST_IN_FLIGHT 分池控制，这里只是别让全局闸成为瓶颈。
+    const MAX_IMG_IN_FLIGHT = 16;
 
     // 单图失败重试次数与退避基数（另加 0~400ms 抖动）
     const IMG_RETRY_TIMES = 2;
