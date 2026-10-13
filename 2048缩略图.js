@@ -363,25 +363,32 @@
         if (outcome === 'timeout') {
             const n = (hostTimeoutStreak.get(origin) || 0) + 1;
             hostTimeoutStreak.set(origin, n);
-            if (n >= HOST_TIMEOUT_THRESHOLD) openHostCooldown(origin);
+            if (n >= HOST_TIMEOUT_THRESHOLD) openHostCooldown(origin, 'timeout');
             return;
         }
         const streak = (hostFailStreak.get(origin) || 0) + 1;
         hostFailStreak.set(origin, streak);
-        if (streak >= HOST_FAIL_THRESHOLD) openHostCooldown(origin);
+        if (streak >= HOST_FAIL_THRESHOLD) openHostCooldown(origin, 'hard');
     }
 
     // 熔断只是让该图床进入冷却，冷却结束自动重开；连续多轮都拿不到成功才彻底放弃
-    function openHostCooldown(origin) {
+    function openHostCooldown(origin, reason) {
         const prev = hostCooldown.get(origin);
         const rounds = (prev ? prev.rounds : 0) + 1;
         hostCooldown.set(origin, { until: Date.now() + HOST_COOLDOWN_MS, rounds: rounds });
         hostFailStreak.delete(origin);
         hostTimeoutStreak.delete(origin);
-        log(`图床进入冷却（第 ${rounds} 轮）: ${origin}`);
+        log(`图床进入冷却（第 ${rounds} 轮，${reason}）: ${origin}`);
         if (rounds > HOST_COOLDOWN_ROUNDS) {
-            rememberDeadHost(origin);   // 本次页面内放弃，并让下一页也不再硬撞
-            hostCooldown.delete(origin);
+            // 只有硬失败（连接被拒/404 等，请求确实结束了）才认定图床已死、写入失败记忆；
+            // 超时类（整窗挂住不响应）可能只是慢——写死记忆会让后续 5 分钟整页跳过，
+            // 慢图床被持久判死。timeout 只重置冷却轮次继续给机会，等到一次成功即解封
+            if (reason === 'hard') {
+                rememberDeadHost(origin);   // 本次页面内放弃，并让下一页也不再硬撞
+                hostCooldown.delete(origin);
+            } else {
+                hostCooldown.set(origin, { until: Date.now() + HOST_COOLDOWN_MS, rounds: 0 });
+            }
         }
     }
 
