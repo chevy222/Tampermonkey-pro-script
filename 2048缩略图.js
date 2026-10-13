@@ -68,9 +68,6 @@
                               '.nav-container', '.movie-banner'];
     const REMOVE_SELECTOR = REMOVE_SELECTORS.join(',');
 
-    // 预连接插入的重试次数
-    const PRECONNECT_RETRY = 25;
-
     /* ============================== 样式 ============================== */
 
     function injectStyle() {
@@ -222,16 +219,12 @@
     function preconnectHost(origin) {
         if (!origin || preconnectedHosts[origin] || isDeadHost(origin)) return;
         preconnectedHosts[origin] = true;
-        insertPreconnect(origin, 0);
+        insertPreconnect(origin);
     }
 
-    function insertPreconnect(origin, tries) {
+    function insertPreconnect(origin) {
         const parent = document.head || document.documentElement;
-        if (!parent) {
-            if (tries < PRECONNECT_RETRY) setTimeout(() => insertPreconnect(origin, tries + 1), 4);
-            else delete preconnectedHosts[origin];
-            return;
-        }
+        if (!parent) { delete preconnectedHosts[origin]; return; }
         const link = document.createElement('link');
         link.rel = 'preconnect';
         link.href = origin;
@@ -260,10 +253,6 @@
             this.settled++;
             if (failed) this.failed++;
             this.render();
-            if (this.settled >= this.total) {
-                // render() 已安排「淡出 → 移除」，此处只在其未安排时兜底
-                if (!this.timer) this.timer = setTimeout(() => this.hide(), PROGRESS_HIDE_DELAY_MS);
-            }
         },
 
         // 手动重试成功 / 迟到 load 回收：把已计入的失败数撤回一次，total/settled 都不动
@@ -317,11 +306,6 @@
             this.el.id = 'thumb-progress';
             parent.appendChild(this.el);
             return this.el;
-        },
-
-        hide() {
-            if (!this.el) return;
-            this.el.style.opacity = '0';
         }
     };
 

@@ -660,10 +660,9 @@
   }
 
   // 该帖张数决定的单张宽度
+  // 单张缩略图的宽度：单图占半宽，多图等分整行
   function thumbWidthRule(count) {
-    if (count <= 1) return '50%';
-    if (count === 2) return '40%';
-    return `calc((100% - ${(count - 1) * THUMB_GAP_PX}px) / ${count})`;
+    return count <= 1 ? '50%' : `calc((100% - ${(count - 1) * THUMB_GAP_PX}px) / ${count})`;
   }
 
   // refetch 为真（硬错误重试）时才加参数破缓存；超时重试沿用原地址
