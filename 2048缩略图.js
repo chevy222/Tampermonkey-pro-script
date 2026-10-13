@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         2048缩略图
 // @namespace    https://fby.hfz300.com/
-// @version      3.11
-// @description  打开页面即全量预加载全部图片：滑动窗口控制并发（全局 + 单域名分池）、失败自动重试与死图床熔断、右下角常驻加载进度。不监听滚动，滚动不触发任何加载。附带去广告、隐藏侧栏、图床 preconnect、跨域图 no-referrer、节点复用自动重试；失败图压暗 + ↻ 角标/点击手动重试（赦免失败记忆）；迟到 load 回收。加载引擎与「色花堂缩略图」同构：imgQueue/imgInFlight/loadThumb/done/trackHostResult。<picture>/srcset 图不接管；广告块先清后扫。
+// @version      3.12
+// @description  打开页面即全量预加载全部图片：滑动窗口控制并发（全局 + 单域名分池）、失败自动重试与死图床熔断、右下角常驻加载进度。不监听滚动，滚动不触发任何加载。附带去广告、隐藏侧栏、图床 preconnect、跨域图 no-referrer、节点复用自动重试；失败图压暗 + ↻ 角标/点击手动重试（赦免失败记忆）；迟到 load 回收。单图总等待预算只累计「请求真正发出后」的在途时间——图床冷却、重试退避、排队等窗口位均不计时，杜绝冷却结束后秒判超时的假失败风暴。<picture>/srcset 图不接管；广告块先清后扫。
 // 失败记忆 t2048BadImages：硬失败的单图与判死的图床共用一张表（TTL 5min）。要恢复尝试：清掉该键后刷新即可。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
@@ -17,7 +17,7 @@
     /* ============================== 可调参数 ============================== */
 
     // 版本号，document-start 阶段写到 <html data-t2048="..."> 上（兼作双注入哨兵）
-    const VERSION = '3.11';
+    const VERSION = '3.12';
 
     // 防双注入（Tampermonkey 装重 / 多渠道注入）：先占位，后到的实例原路退出。
     // 两个实例的 observer 会互相 resetImage 涨 _gen，把对方的加载闭包全部短路，图永远不结算
@@ -413,7 +413,8 @@
         // 生成代号：站点改写 src（节点复用）或再次手动重试时作废本闭包，
         // 陈旧的 load/error/timer/队列任务全部短路，防止错记到新图上
         const gen = (img._gen = (img._gen || 0) + 1);
-        let startedAt = 0;
+        let startedAt = 0;    // 本次请求真正发出的时刻（在途计时起点）
+        let waitUsed = 0;     // 跨重试累计的在途等待毫秒；冷却/排队/退避不计入
         let attempt = 0;
         let settled = false;
         let failedFlag = false;
@@ -496,7 +497,6 @@
                 img._holding = true;
                 img._heldHost = origin;
                 inFlightByHost.set(origin, (inFlightByHost.get(origin) || 0) + 1);
-                if (attempt === 0) startedAt = performance.now();
                 if (!manual) {
                     // 图床冷却中：整批往后挪，等冷却结束再试，不计失败也不占槽位
                     const wait = hostCooldownWait(origin);
@@ -512,6 +512,10 @@
                     done(!ok, ok ? 'ok' : 'cached-hard');
                     return;
                 }
+                // 总等待预算只累计「请求真正发出后」的在途时间：
+                // 冷却等待、重试退避、排队等窗口位都不计时。否则这些时间会先耗尽预算，
+                // 重新派发的图被秒判超时 → 超时喂熔断计数 → 再冷却 → 更多秒判，恶性循环
+                startedAt = performance.now();
                 armWait();
             };
             task._img = img;     // resetImage 据此出队
@@ -523,7 +527,7 @@
         const armWait = () => {
             clearTimeout(timer);
             timer = setTimeout(() => { if (img._gen === gen) onTimeout(); },
-                Math.max(0, IMG_TOTAL_WAIT_MS - (performance.now() - startedAt)));
+                Math.max(0, IMG_TOTAL_WAIT_MS - waitUsed));
         };
 
         // 图床冷却期间把这次派发整体推迟，不结算也不占槽位
@@ -535,6 +539,7 @@
         function retryLater(hard) {
             attempt++;
             refetch = hard;   // 只有「请求已经结束」的硬错误才换地址重发
+            waitUsed += performance.now() - startedAt;   // 本次在途时长计入总预算，退避等待不计
             releaseSlot();
             const delay = IMG_RETRY_BASE_MS * attempt + Math.floor(Math.random() * 400);
             timer = setTimeout(() => { if (img._gen === gen) queueAttempt(); }, delay);
@@ -543,6 +548,7 @@
         function onTimeout() {
             if (settled || img._gen !== gen) return;
             clearTimeout(timer);
+            waitUsed += performance.now() - startedAt;
             // 超时按失败送进 done()，是否真的算失败由 done() 依据「有没有解出画面」判定；
             // 不重发（重赋 src 会取消在途请求并重排队尾）
             done(true, 'timeout');
