@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂缩略图
 // @namespace    http://98tang.com/
-// @version      3.15
+// @version      3.16
 // @description  PC列表页从移动版触屏模板取缩略图，页面打开时一次性全部加载（无懒加载、无滚动触发、无按需加载），宽屏单列布局 + 加载进度提示 + 失败自动重试；搜索页栏目过滤与详情图加载；详情页宽屏去广告、正文图纳入同一加载引擎（进度提示 + 失败压暗 + 角标重试）；搜索繁忙自动刷新；失败图压暗留位 + 角标 ↻ 手动重试；双注入防护；迟到 load 回收。
 // 失败记忆 sehuaBadImages：硬失败的单图与判死的图床共用一张表（TTL 5min）。要恢复尝试：清掉该键后刷新即可。
 // @author       Chevy Yang
@@ -19,7 +19,7 @@
 
   // 版本号，document-start 阶段写到 <html data-sehua="..."> 上（兼作双注入哨兵）
   // 必须与文件头 @version 保持一致，否则哨兵值与声明版本对不上，排障时会误判
-  const VERSION = '3.15';
+  const VERSION = '3.16';
 
   // 防双注入（Tampermonkey 装重 / 多渠道注入）：先占位，后到的实例原路退出
   if (document.documentElement.getAttribute('data-sehua')) return;
@@ -788,6 +788,7 @@
           if (!settled || !failedFlag) return;
           if (img.naturalWidth <= 0) return;
           failedFlag = false;
+          forgetImage(url);   // 同步赦免记忆：图已可见，不能留着失败记录让刷新后 skip
           thumbProgress.revive();
           anchor.classList.remove('sehua-failed');
           const btn = anchor.querySelector('.sehua-retry');
@@ -866,8 +867,11 @@
     img.addEventListener('load', () => {
       if (img.naturalWidth > 0) {
         if (settled && failedFlag) {
-          // 迟到 load：已按失败结算后请求才完成，撤回失败记账与暗态
+          // 迟到 load：已按失败结算后请求才完成，撤回失败记账与暗态，
+          // 并赦免失败记忆——否则图已可见但记忆里仍记着失败，
+          // 5 分钟内刷新会被 skip 直接判死（"刚还好好的图，刷新后坏了"）
           failedFlag = false;
+          forgetImage(url);
           thumbProgress.revive();
           anchor.classList.remove('sehua-failed');
           const btn = anchor.querySelector('.sehua-retry');
