@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048缩略图
 // @namespace    https://fby.hfz300.com/
-// @version      3.9
+// @version      3.10
 // @description  打开页面即全量预加载全部图片：滑动窗口控制并发（全局 + 单域名分池）、失败自动重试与死图床熔断、右下角常驻加载进度。不监听滚动，滚动不触发任何加载。附带去广告、隐藏侧栏、图床 preconnect、跨域图 no-referrer、节点复用自动重试；失败图压暗 + ↻ 角标/点击手动重试（赦免失败记忆）；迟到 load 回收。加载引擎与「色花堂缩略图」同构：imgQueue/imgInFlight/loadThumb/done/trackHostResult。<picture>/srcset 图不接管；广告块先清后扫。
 // 失败记忆 t2048BadImages：硬失败的单图与判死的图床共用一张表（TTL 5min）。要恢复尝试：清掉该键后刷新即可。
 // @author       Chevy Yang
@@ -17,7 +17,7 @@
     /* ============================== 可调参数 ============================== */
 
     // 版本号，document-start 阶段写到 <html data-t2048="..."> 上（兼作双注入哨兵）
-    const VERSION = '3.9';
+    const VERSION = '3.10';
 
     // 防双注入（Tampermonkey 装重 / 多渠道注入）：先占位，后到的实例原路退出。
     // 两个实例的 observer 会互相 resetImage 涨 _gen，把对方的加载闭包全部短路，图永远不结算
@@ -278,7 +278,9 @@
                 clearTimeout(this.timer); this.timer = null;
                 clearTimeout(this.removeTimer); this.removeTimer = null;
                 el.style.opacity = '';
-                el.textContent = `缩略图加载中 ${this.settled}/${this.total}`;
+                el.textContent = this.failed > 0
+                    ? `缩略图已完成 ${this.settled}/${this.total}（${this.failed} 张失败）`
+                    : `缩略图已完成 ${this.settled}/${this.total}`;
                 return;
             }
             el.textContent = this.failed > 0
@@ -398,6 +400,9 @@
 
         const done = (failed, outcome) => {
             if (settled || img._gen !== gen) return;
+            // 已经解出画面（naturalWidth > 0）就按成功结算：用户看得见内容，
+            // 再压暗只会让人以为图坏了。标记失败并不会中止请求，图仍会把剩余部分下完。
+            if (failed && img.naturalWidth > 0) { failed = false; outcome = 'partial'; }
             settled = true;
             failedFlag = failed;
             img._wasSettled = true;
@@ -405,7 +410,8 @@
             clearTimeout(timer);
             releaseSlot();
 
-            if (!failed) trackHostResult(origin, 'ok');
+            // partial = 已解出画面但没传完，不计入图床健康度
+            if (!failed) { if (outcome === 'ok') trackHostResult(origin, 'ok'); }
             else if (outcome === 'hard') { rememberBadImage(url); trackHostResult(origin, 'hard'); }
             else if (outcome === 'timeout') trackHostResult(origin, 'timeout');
             else if (outcome === 'cached-hard') rememberBadImage(url);
@@ -426,7 +432,25 @@
                 thumbProgress.settle(failed);
                 if (failed) markFailed(img);
             }
+            // 结算时还没解出画面、之后数据才到的图：复核一次并撤回暗态与失败计数
+            if (failed) recheckAfterFail();
         };
+
+        // 失败后的复核。数据可能刚好在结算之后才到，此时图已经能看见，
+        // 再压着只会让人以为图坏了
+        function recheckAfterFail() {
+            [2000, 6000].forEach(delay => {
+                setTimeout(() => {
+                    if (img._gen !== gen) return;
+                    if (!settled || !failedFlag) return;
+                    if (img.naturalWidth <= 0) return;
+                    failedFlag = false;
+                    img._wasFailed = false;
+                    thumbProgress.revive();
+                    unmarkFailed(img);
+                }, delay);
+            });
+        }
 
         // 把下一次尝试排进队列（队尾）
         const queueAttempt = () => {
@@ -475,8 +499,8 @@
         function onTimeout() {
             if (settled || img._gen !== gen) return;
             clearTimeout(timer);
-            // 超时一律结算为失败，不再重发：那次请求可能还卡在浏览器的连接队列里，
-            // 重发只会取消它并把它重新排到队尾。真慢的图由「迟到 load 回收」兜底。
+            // 超时按失败送进 done()，是否真的算失败由 done() 依据「有没有解出画面」判定；
+            // 不重发（重赋 src 会取消在途请求并重排队尾）
             done(true, 'timeout');
         }
 

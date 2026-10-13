@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂缩略图
 // @namespace    http://98tang.com/
-// @version      3.12
+// @version      3.13
 // @description  PC列表页从移动版触屏模板取缩略图，页面打开时一次性全部加载（无懒加载、无滚动触发、无按需加载），宽屏单列布局 + 加载进度提示 + 失败自动重试；搜索页栏目过滤与详情图加载；详情页宽屏去广告、正文图纳入同一加载引擎（进度提示 + 失败压暗 + 角标重试）；搜索繁忙自动刷新；失败图压暗留位 + 角标 ↻ 手动重试；双注入防护；迟到 load 回收。
 // 失败记忆 sehuaBadImages：硬失败的单图与判死的图床共用一张表（TTL 5min）。要恢复尝试：清掉该键后刷新即可。
 // @author       Chevy Yang
@@ -19,7 +19,7 @@
 
   // 版本号，document-start 阶段写到 <html data-sehua="..."> 上（兼作双注入哨兵）
   // 必须与文件头 @version 保持一致，否则哨兵值与声明版本对不上，排障时会误判
-  const VERSION = '3.12';
+  const VERSION = '3.13';
 
   // 防双注入（Tampermonkey 装重 / 多渠道注入）：先占位，后到的实例原路退出
   if (document.documentElement.getAttribute('data-sehua')) return;
@@ -517,7 +517,9 @@
       const done = this.settled >= this.total;
       el.classList.toggle('sehua-done', done && this.failed === 0);
       el.classList.toggle('sehua-partial', done && this.failed > 0);
-      if (!done) el.textContent = `缩略图加载中 ${this.settled}/${this.total}`;
+      if (!done) el.textContent = this.failed > 0
+        ? `缩略图已完成 ${this.settled}/${this.total}（${this.failed} 张失败）`
+        : `缩略图已完成 ${this.settled}/${this.total}`;
       else if (this.failed > 0) el.textContent = `缩略图 ${this.total - this.failed}/${this.total}（${this.failed} 张失败）`;
       else el.textContent = `缩略图 ${this.total} 张已加载`;
     },
@@ -713,12 +715,16 @@
 
     const done = (failed, outcome) => {
       if (settled) return;
+      // 已经解出画面（naturalWidth > 0）就按成功结算：用户看得见内容，
+      // 再压暗只会让人以为图坏了。标记失败并不会中止请求，图仍会把剩余部分下完。
+      if (failed && img.naturalWidth > 0) { failed = false; outcome = 'partial'; }
       settled = true;
       failedFlag = failed;
       clearTimeout(timer);
       releaseSlot();
 
-      if (!failed) trackHostResult(origin, 'ok');
+      // partial = 已解出画面但没传完，不计入图床健康度
+      if (!failed) { if (outcome === 'ok') trackHostResult(origin, 'ok'); }
       else if (outcome === 'hard') { rememberBadImage(url); trackHostResult(origin, 'hard'); }
       else if (outcome === 'timeout') trackHostResult(origin, 'timeout');
       else if (outcome === 'cached-hard') rememberBadImage(url);
@@ -741,7 +747,25 @@
         thumbProgress.settle(failed);
         if (failed) markFailedAnchor(anchor, url, wrap);
       }
+      // 结算时还没解出画面、之后数据才到的图：复核一次并撤回暗态与失败计数
+      if (failed) recheckAfterFail();
     };
+
+    // 失败后的复核。数据可能刚好在结算之后才到，此时图已经能看见，
+    // 再压着只会让人以为图坏了
+    function recheckAfterFail() {
+      [2000, 6000].forEach(delay => {
+        setTimeout(() => {
+          if (!settled || !failedFlag) return;
+          if (img.naturalWidth <= 0) return;
+          failedFlag = false;
+          thumbProgress.revive();
+          anchor.classList.remove('sehua-failed');
+          const btn = anchor.querySelector('.sehua-retry');
+          if (btn) btn.remove();
+        }, delay);
+      });
+    }
 
     // 把下一次尝试排进队列（队尾）
     const queueAttempt = () => {
@@ -787,8 +811,8 @@
     function onTimeout() {
       if (settled) return;
       clearTimeout(timer);
-      // 超时一律结算为失败，不再重发：那次请求可能还卡在浏览器的连接队列里，
-      // 重发只会取消它并把它重新排到队尾。真慢的图由「迟到 load 回收」兜底。
+      // 超时按失败送进 done()，是否真的算失败由 done() 依据「有没有解出画面」判定；
+      // 不重发（重赋 src 会取消在途请求并重排队尾）
       done(true, 'timeout');
     }
 
