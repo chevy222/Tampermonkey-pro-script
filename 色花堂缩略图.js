@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         色花堂缩略图
 // @namespace    http://98tang.com/
-// @version      3.8
-// @description  PC列表页从移动版触屏模板取缩略图，页面打开时一次性全部加载（无懒加载、无滚动触发、无按需加载），宽屏单列布局 + 加载进度提示 + 失败自动重试；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新。
+// @version      3.10
+// @description  PC列表页从移动版触屏模板取缩略图，页面打开时一次性全部加载（无懒加载、无滚动触发、无按需加载），宽屏单列布局 + 加载进度提示 + 失败自动重试；搜索页栏目过滤与详情图加载；详情页宽屏去广告；搜索繁忙自动刷新；失败图压暗留位 + 角标 ↻ 手动重试；双注入防护；迟到 load 回收。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
 // @connect      bhagq.4yl7j.com
@@ -16,8 +16,12 @@
 
   // ============================ 可调参数 ============================
 
-  // 版本号，与头部 @version 保持一致，运行时写到 <html data-sehua="..."> 上
-  const VERSION = '3.8';
+  // 版本号，document-start 阶段写到 <html data-sehua="..."> 上（兼作双注入哨兵）
+  const VERSION = '3.9';
+
+  // 防双注入（Tampermonkey 装重 / 多渠道注入）：先占位，后到的实例原路退出
+  if (document.documentElement.getAttribute('data-sehua')) return;
+  document.documentElement.setAttribute('data-sehua', VERSION);
 
   // 移动版 User-Agent，服务端据此分发触屏模板
   const MOBILE_UA = 'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36';
@@ -421,7 +425,10 @@
   const THUMB_CSS = `
     .sehua-thumb { --img-width: 50%; display: flex; flex-wrap: wrap; justify-content: center; gap: ${THUMB_GAP_PX}px; margin-top: 8px; }
     .sehua-thumb img { height: auto !important; aspect-ratio: 3/2; object-fit: cover; border-radius: 4px; border: 1px solid #ddd; background: #f5f5f5; box-sizing: border-box !important; width: 100% !important; transition: border-color 0.2s ease; }
-    .sehua-thumb > a { display: flex; align-items: center; justify-content: center; text-decoration: none; width: var(--img-width) !important; }
+    .sehua-thumb > a { display: flex; align-items: center; justify-content: center; text-decoration: none; width: var(--img-width) !important; position: relative; }
+    .sehua-thumb a.sehua-failed { opacity: 0.4; filter: grayscale(1); }
+    .sehua-retry { position: absolute; top: 4px; right: 4px; z-index: 2; display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; background: rgba(0, 0, 0, 0.65); color: #fff; font-size: 13px; line-height: 1; cursor: pointer; }
+    .sehua-retry:hover { background: rgba(0, 0, 0, 0.85); }
     .sehua-thumb img:hover { border-color: #4a90d9; }
     .sehua-date { display: inline-block; margin-top: 4px; font-size: 12px; color: #999; }
   `;
@@ -483,6 +490,12 @@
         clearTimeout(this.timer);
         this.timer = setTimeout(() => this.hide(), PROGRESS_HIDE_DELAY);
       }
+    },
+
+    // 手动重试成功：只把之前那次失败减回去，total/settled 都不动（分母不能被顶大）
+    revive() {
+      if (this.failed > 0) this.failed--;
+      this.render();
     },
 
     render() {
@@ -572,6 +585,18 @@
     trimStamps(badImageStamps, badImages, BAD_IMAGE_MAX, BAD_IMAGE_KEY);
   }
 
+  // 手动重试前的"赦免"：把某张图从硬失败/超时两张表里除名并落盘，
+  // 否则重试一进门就会被 loadThumb 行内的记忆检查自己挡回来
+  function forgetImage(url) {
+    let dirty = false;
+    if (badImages.delete(url)) { delete badImageStamps[url]; dirty = true; }
+    if (slowImages.delete(url)) { delete slowImageStamps[url]; dirty = true; }
+    if (dirty) {
+      writeStampTable(BAD_IMAGE_KEY, badImageStamps);
+      writeStampTable(SLOW_IMAGE_KEY, slowImageStamps);
+    }
+  }
+
   // 图床恢复可用时立刻忘掉它
   function forgetHost(origin) {
     if (!deadHosts.has(origin)) return;
@@ -641,12 +666,26 @@
     return `calc((100% - ${(count - 1) * THUMB_GAP_PX}px) / ${count})`;
   }
 
-  // 加载一张缩略图。窗口位按次持有，重试排到队尾
-  function loadThumb(img, url, anchor, wrap) {
+  // 前两次尝试用原地址（命中缓存直接成功），之后才穿透缓存
+  function attemptUrl(url, attempt) {
+    if (attempt <= 1) return url;
+    return url + (url.indexOf('?') === -1 ? '?' : '&') + '_r=' + Date.now() + attempt;
+  }
+
+  // 记录脚本自己写进去的 src。本站 img 由脚本自建自管，站点不会改写，
+  // 所以不需要 2048 那边的 _selfSrc 比对（那边要防 MutationObserver 误判节点复用）
+  function setImgSrc(img, url) {
+    img.src = url;
+  }
+
+  // 加载一张缩略图。窗口位按次持有，重试排到队尾。
+  // manual=true 为角标手动重试专用：不 add/settle（不动进度分母），强行绕过失败记忆发请求
+  function loadThumb(img, url, anchor, wrap, manual = false) {
     const origin = imageOrigin(url);
     let startedAt = 0;
     let attempt = 0;
     let settled = false;
+    let failedFlag = false;
     let holding = false;
     let timer = null;
 
@@ -660,6 +699,7 @@
     const done = (failed, outcome) => {
       if (settled) return;
       settled = true;
+      failedFlag = failed;
       clearTimeout(timer);
       releaseSlot();
 
@@ -668,10 +708,20 @@
       else if (outcome === 'timeout') rememberBadImage(url, true);
       else if (outcome === 'cached-hard') rememberBadImage(url);
 
-      thumbProgress.settle(failed);
-      if (failed) {
-        anchor.remove();
-        if (!wrap.querySelector('img')) wrap.remove();
+      if (manual) {
+        if (!failed) {
+          // 手动重试成功：失败计数减回去，顺手清掉暗态和角标
+          thumbProgress.revive();
+          anchor.classList.remove('sehua-failed');
+          const btn = anchor.querySelector('.sehua-retry');
+          if (btn) btn.remove();
+        } else {
+          // 手动重试又挂了：恢复暗态 + 角标，还能再按
+          markFailedAnchor(anchor, url, wrap);
+        }
+      } else {
+        thumbProgress.settle(failed);
+        if (failed) markFailedAnchor(anchor, url, wrap);
       }
     };
 
@@ -683,8 +733,10 @@
         imgInFlight++;
         holding = true;
         if (attempt === 0) startedAt = performance.now();
-        if (deadHosts.has(origin)) { done(true, 'skip'); return; }
-        img.src = attempt === 0 ? url : url + (url.indexOf('?') === -1 ? '?' : '&') + '_r=' + attempt;
+        if (!manual && deadHosts.has(origin)) { done(true, 'skip'); return; }
+        const nextUrl = attemptUrl(url, attempt);
+        // 重试必须重新赋值触发再取；首次且属性已是目标地址时不重复赋值
+        if (attempt > 0 || img.getAttribute('src') !== nextUrl) setImgSrc(img, nextUrl);
         // 命中缓存时直接结算
         if (img.complete) {
           const ok = img.naturalWidth > 0;
@@ -723,13 +775,67 @@
       retryLater();
     }
 
-    img.addEventListener('load', () => done(false, 'ok'));
+    img.addEventListener('load', () => {
+      if (img.naturalWidth > 0) {
+        if (settled && failedFlag) {
+          // 迟到 load：已按失败结算后请求才完成，撤回失败记账与暗态
+          failedFlag = false;
+          thumbProgress.revive();
+          anchor.classList.remove('sehua-failed');
+          const btn = anchor.querySelector('.sehua-retry');
+          if (btn) btn.remove();
+          return;
+        }
+        done(false, 'ok');
+      } else {
+        onError();   // load 了但宽度为 0 = 坏图，按错误走重试链
+      }
+    });
     img.addEventListener('error', onError);
 
-    thumbProgress.add(1);
-    // 命中失败记忆：直接跳过
-    if (badImages.has(url) || slowImages.has(url) || deadHosts.has(origin)) { done(true, 'skip'); return; }
+    if (!manual) thumbProgress.add(1);
+    // 命中失败记忆：直接跳过（manual 模式已在 manualRetry 里赦免，强行放行）
+    if (!manual && (badImages.has(url) || slowImages.has(url) || deadHosts.has(origin))) { done(true, 'skip'); return; }
     queueAttempt();
+  }
+
+  // 失败兜底：暗色占位 + 角标重试按钮（不再删锚点——图格宽度不变，列表不跳布局）
+  function markFailedAnchor(anchor, url, wrap) {
+    anchor.classList.add('sehua-failed');
+    const img = anchor.querySelector('img');
+    if (img) img.removeAttribute('src');   // 去裂图图标，留一块干净的灰
+    if (anchor.querySelector('.sehua-retry')) return;
+    const btn = document.createElement('span');
+    btn.className = 'sehua-retry';
+    btn.textContent = '↻';
+    btn.title = '重试这张图';
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();   // 否则会顺着 anchor 跳详情页
+      const cur = anchor.querySelector('img');
+      if (!cur) return;
+      manualRetry(cur, url, anchor, wrap);
+    });
+    anchor.appendChild(btn);
+  }
+
+  // 手动重试：先赦免失败记忆（不清就会被记忆检查自己挡回来），换一张干净 img 重发。
+  // 换节点是因为失败态 img 是 complete=true/naturalWidth=0，且旧监听还挂在上面
+  function manualRetry(img, url, anchor, wrap) {
+    const origin = imageOrigin(url);
+    forgetImage(url);
+    forgetHost(origin);
+    hostFailStreak.delete(origin);   // 只解封不清 streak 的话，残留 ≥3 会让紧接着一次真失败又秒判死
+    anchor.classList.remove('sehua-failed');
+    const oldBtn = anchor.querySelector('.sehua-retry');
+    if (oldBtn) oldBtn.remove();
+
+    const fresh = document.createElement('img');
+    fresh.decoding = 'async';
+    fresh.loading = 'eager';
+    anchor.replaceChild(fresh, img);
+
+    loadThumb(fresh, url, anchor, wrap, true);
   }
 
   // 建缩略图容器并同步开始加载全部图片
@@ -1033,16 +1139,41 @@
 
   // ============================ 详情页 / 首页 ============================
 
-  // 详情页：掐掉站点自己的滚动补图（占位符换成真地址，打上 lazyloaded 标记）
+  // 单张正文图：占位符换成真地址，打上 lazyloaded 标记；有改动返回 true
+  function fixLazyImg(img) {
+    let touched = false;
+    const real = img.getAttribute('file');
+    const cur = img.getAttribute('src');
+    if (real && (!cur || isPlaceholder(cur))) { img.setAttribute('src', real); touched = true; }
+    if (!img.getAttribute('lazyloaded')) { img.setAttribute('lazyloaded', 'true'); touched = true; }
+    return touched;
+  }
+
+  // 详情页：掐掉站点自己的滚动补图。折叠楼层是滚动/交互时才插图，补个观察者兜底
   function disableSiteLazyLoad() {
-    let 换src = 0, 标记 = 0;
+    let fixed = 0;
     document.querySelectorAll('#postlist img[file]').forEach(img => {
-      const real = img.getAttribute('file');
-      const cur = img.getAttribute('src');
-      if (real && (!cur || isPlaceholder(cur))) { img.setAttribute('src', real); 换src++; }
-      if (!img.getAttribute('lazyloaded')) { img.setAttribute('lazyloaded', 'true'); 标记++; }
+      if (fixLazyImg(img)) fixed++;
     });
-    if (换src || 标记) log(`正文图：${换src} 张从占位符换成真地址、${标记} 张打上 lazyloaded`);
+    if (fixed) log(`正文图：${fixed} 张从占位符换成真地址/打上 lazyloaded`);
+
+    const postlist = document.getElementById('postlist');
+    if (!postlist || postlist.__sehuaImgObserver) return;
+    const observer = new MutationObserver(mutations => {
+      let added = 0;
+      mutations.forEach(m => m.addedNodes.forEach(node => {
+        if (node.nodeType !== 1) return;
+        if (node.matches && node.matches('img[file]') && fixLazyImg(node)) added++;
+        if (node.querySelectorAll) {
+          node.querySelectorAll('img[file]').forEach(img => {
+            if (fixLazyImg(img)) added++;
+          });
+        }
+      }));
+      if (added) log(`正文图（新增节点）：${added} 张补齐`);
+    });
+    observer.observe(postlist, { childList: true, subtree: true });
+    postlist.__sehuaImgObserver = observer;
   }
 
   function detailPageMain() {
@@ -1102,7 +1233,7 @@
     prefetchNextPageMapping(fid, page);
 
     if (fallbackTids.length > 0) {
-      const fallbackBatch = Array.from(document.querySelectorAll('#threadlisttableid tbody[id^=normalthread_]'))
+      const fallbackBatch = Array.from(document.querySelectorAll('#threadlisttableid tbody[id^=normalthread_], #threadlisttableid tbody[id^=stickthread_]'))
         .filter(tb => {
           const tid = tb.id?.match(/\d+/)?.[0];
           return tid && fallbackTids.includes(tid);
@@ -1133,8 +1264,6 @@
 
   async function onDomReady() {
     try {
-      document.documentElement.dataset.sehua = VERSION;
-
       if (autoReloadOnSearchBusy()) return;
 
       if (location.pathname.indexOf('/search.php') !== -1) {
