@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂精简
 // @namespace    http://98tang.com/
-// @version      1.8
+// @version      1.9
 // @description  色花堂精简版：去广告；PC 列表页注入移动版缩略图（打开即全部加载、宽屏单列、发帖日期搬到标题下）；详情页宽屏、正文撑满居中、去懒加载/去滚动补图；检索页宽屏、从详情页抽取缩略图 + 栏目过滤开关 + 搜索繁忙拦截自动刷新重试（5 次）。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -119,7 +119,7 @@
   // 详情页去懒加载（占位图立即换真地址 + lazyloaded 标记，站点滚动加载器跳过）+ 宽屏、正文撑满、图居中
   function detailPageMain() {
     if (!document.getElementById('postlist')) return;
-    addStyle(WIDE_CSS + ' #postlist { width: 100% !important; } #postlist ignore_js_op { text-align: center; } #postlist ignore_js_op img.zoom { display: block; margin-left: auto; margin-right: auto; }');
+    addStyle(WIDE_CSS + ' #postlist { width: 100% !important; } #postlist ignore_js_op { text-align: center; } #postlist ignore_js_op img.zoom { display: block; margin-left: auto; margin-right: auto; min-height: 120px; background: #f2f2f2; }');
     removeUnused();
     document.querySelectorAll('#postlist img[file]').forEach(img => {
       if (!img.getAttribute('src') || isPlaceholder(img.getAttribute('src'))) img.setAttribute('src', img.getAttribute('file'));

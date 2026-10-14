@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂缩略图
 // @namespace    http://98tang.com/
-// @version      3.19
+// @version      3.20
 // @description  PC列表页从移动版触屏模板取缩略图，页面打开时一次性全部加载（无懒加载、无滚动触发、无按需加载），宽屏单列布局 + 加载进度提示 + 失败自动重试；搜索页栏目过滤与详情图加载；详情页宽屏去广告、正文图纳入同一加载引擎（进度提示 + 失败压暗 + 角标重试）；搜索繁忙自动刷新；失败图压暗留位 + 角标 ↻ 手动重试；双注入防护；迟到 load 回收。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -443,10 +443,13 @@
   `;
 
   // 详情页正文图：进度提示 + 失败角标 + 失败压暗（只压图本身，角标保持清晰）
+  // 失败占位：包裹段给最小高度+底色，让失败图有个居中的可见占位箱；
+  // 角标改居中定位——包裹段（文件名行）远宽于图，right 定位会把角标甩到段落右缘
   const DETAIL_CSS = `
     ${PROGRESS_CSS}${RETRY_CSS}
     #postlist .sehua-failed { position: relative; }
-    #postlist .sehua-failed > img { opacity: 0.35; filter: grayscale(1); }
+    #postlist .sehua-failed > img { opacity: 0.35; filter: grayscale(1); min-height: 120px; background: #f2f2f2; }
+    #postlist .sehua-retry { top: 50%; left: 50%; right: auto; margin: -12px 0 0 -12px; }
   `;
 
   // 需要缩略图的页面共用的样式前缀
