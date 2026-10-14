@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         色花堂精简
 // @namespace    http://98tang.com/
-// @version      1.6
-// @description  色花堂精简版：去广告；PC 列表页注入移动版缩略图（打开即全部加载、宽屏单列、发帖日期搬到标题下）；详情页去懒加载/去滚动补图；检索页从详情页抽取缩略图 + 栏目过滤开关 + 搜索繁忙拦截自动刷新重试（5 次）。
+// @version      1.7
+// @description  色花堂精简版：去广告；PC 列表页注入移动版缩略图（打开即全部加载、宽屏单列、发帖日期搬到标题下）；详情页宽屏、正文撑满居中、去懒加载/去滚动补图；检索页宽屏、从详情页抽取缩略图 + 栏目过滤开关 + 搜索繁忙拦截自动刷新重试（5 次）。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
 // @connect      bhagq.4yl7j.com
@@ -96,11 +96,14 @@
     return null;
   })();
 
-  const THUMB_CSS = `
+  const WIDE_CSS = `
     .wp { width: 100% !important; margin: 0 !important; box-sizing: border-box !important; }
     #nv { width: 100% !important; left: 0 !important; right: 0 !important; }
     #ct { width: auto !important; margin: 0 !important; padding: 0 10px !important; box-sizing: border-box !important; }
     body { overflow-x: hidden !important; }
+  `;
+
+  const THUMB_CSS = WIDE_CSS + `
     .sehua-thumb { --img-width: 50%; display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 8px; }
     .sehua-thumb img { height: auto !important; aspect-ratio: 3/2; object-fit: cover; border-radius: 4px; border: 1px solid #ddd; background: #f5f5f5; box-sizing: border-box !important; width: 100% !important; }
     .sehua-thumb > a { display: flex; align-items: center; justify-content: center; text-decoration: none; width: var(--img-width) !important; position: relative; }
@@ -154,9 +157,14 @@
     });
   }
 
-  // 详情页去懒加载 + 去滚动补图：占位图立即换真地址并打 lazyloaded 标记（站点滚动加载器跳过它）
+  // 详情页去懒加载 + 去滚动补图：占位图立即换真地址并打 lazyloaded 标记（站点滚动加载器跳过它）；宽屏 + 正文撑满 + 图居中
   function detailPageMain() {
     if (!document.getElementById('postlist')) return;
+    addStyle(WIDE_CSS + `
+      #postlist { width: 100% !important; }
+      #postlist ignore_js_op { text-align: center; }
+      #postlist ignore_js_op img.zoom { display: block; margin-left: auto; margin-right: auto; }
+    `);
     removeUnused();
     document.querySelectorAll('#postlist img[file]').forEach(img => {
       const cur = img.getAttribute('src');
@@ -222,7 +230,7 @@
 
   async function searchPageMain() {
     addStyle(THUMB_CSS + `
-      #threadlist .slst.mtw { width: 100% !important; }
+      .slst.mtw { width: 100% !important; }
       div.sehua-loading { color: #999; font-size: 12px; text-align: center; padding: 8px; }
     `);
     removeUnused();
