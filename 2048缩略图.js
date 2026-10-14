@@ -67,7 +67,7 @@
     /* ============================== 样式 ============================== */
 
     function injectStyle() {
-        if (!document.head && !document.documentElement) { setTimeout(injectStyle, 4); return; }
+        // document-start 下 documentElement 必存在，无需等待 head
         const s = document.createElement('style');
         s.textContent = `
             /* 放弃加载的图：压暗标记，点击重新排队再试 */
@@ -220,7 +220,6 @@
 
     function insertPreconnect(origin) {
         const parent = document.head || document.documentElement;
-        if (!parent) { delete preconnectedHosts[origin]; return; }
         const link = document.createElement('link');
         link.rel = 'preconnect';
         link.href = origin;
@@ -452,7 +451,8 @@
                 if (failed) markFailed(img);
             }
             // 结算时还没解出画面、之后数据才到的图：复核一次并撤回暗态与失败计数
-            if (failed) recheckAfterFail();
+            // skip 只是没试过（命中失败记忆/判死图床），不是真失败，无需复核
+            if (failed && outcome !== 'skip') recheckAfterFail();
         };
 
         // 失败后持续复核：数据迟到到达时撤回暗态和失败计数
@@ -525,7 +525,9 @@
         function retryLater(hard) {
             attempt++;
             refetch = hard;   // 硬错误才换地址
-            waitUsed += performance.now() - startedAt;   // 累计在途时间，退避不计
+            // 累计在途时间，退避不计；startedAt=0（未派发就出错）时跳过，
+            // 防止把页面已运行时长灌进预算导致后续重试被立即判超时
+            if (startedAt) waitUsed += performance.now() - startedAt;
             releaseSlot();
             const delay = IMG_RETRY_BASE_MS * attempt + Math.floor(Math.random() * 400);
             timer = setTimeout(() => { if (img._gen === gen) queueAttempt(); }, delay);
@@ -534,7 +536,7 @@
         function onTimeout() {
             if (settled || img._gen !== gen) return;
             clearTimeout(timer);
-            waitUsed += performance.now() - startedAt;
+            if (startedAt) waitUsed += performance.now() - startedAt;
             // 超时送 done() 判定是否真失败；不重发（重赋 src 会取消在途请求）
             done(true, 'timeout');
         }
@@ -580,7 +582,8 @@
 
     // 失败图的 ↻ 重试角标：挂到 img 外层容器右上角
     function attachRetryBadge(img) {
-        if (img._retryBadge) return;
+        // 已挂且仍在文档里才算数：站点重绘把角标摘掉后要能补回来
+        if (img._retryBadge && img._retryBadge.isConnected) return;
         const parent = img.parentElement;
         if (!parent || parent === document.body || parent === document.documentElement) return;
         try {
@@ -634,6 +637,7 @@
         forgetImage(img._url);
         forgetHost(img._host);
         hostFailStreak.delete(img._host);
+        hostTimeoutStreak.delete(img._host);
         hostCooldown.delete(img._host);
         loadThumb(img, img._url, true, false);
     }
@@ -786,25 +790,22 @@
             const nodes = mutation.addedNodes;
             for (let i = 0; i < nodes.length; i++) {
                 const node = nodes[i];
+                if (node.nodeType !== 1) continue;   // 文本/注释节点不入队
                 // 单个 IMG 就地登记，不进批量
-                if (node.nodeType === 1 && node.tagName === 'IMG') pickImage(node);
+                if (node.tagName === 'IMG') pickImage(node);
                 else pendingNodes.push(node);
             }
         }
         if (pendingNodes.length || pendingAttrs.length) scheduleFlush();
     });
 
-    function startObserver() {
-        if (document.documentElement) {
-            observer.observe(document.documentElement, {
-                childList: true,
-                subtree: true,
-                attributes: true,
-                attributeFilter: ['src']
-            });
-        } else { setTimeout(startObserver, 10); }
-    }
-    startObserver();
+    // document-start 下 documentElement 必存在，直接开观察者
+    observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['src']
+    });
 
     /* ============================== 启动 ============================== */
 

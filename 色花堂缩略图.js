@@ -269,9 +269,16 @@
     } catch (e) {}
   }
 
+  // 缓存键必须带上影响请求结果的筛选参数：移动版请求本身带有
+  // filter/orderby/typeid/specialtype（均取自 location.search），
+  // 只按 fid_page 缓存会在切换筛选/排序后命中上一个条件的旧映射
+  function pageCacheKey(fid, page) {
+    return fid + '_' + page + '_' + location.search;
+  }
+
   // 取某一页的移动版缩略图映射
   function fetchMobileThumbsByPage(fid, page, allowRetry = true) {
-    const key = fid + '_' + page;
+    const key = pageCacheKey(fid, page);
     if (thumbCache[key]) return Promise.resolve(thumbCache[key]);
     const persisted = readPageCache(key);
     if (persisted) { thumbCache[key] = persisted; return Promise.resolve(persisted); }
@@ -303,15 +310,11 @@
   const IMG_HOST_MAX = 4;
 
   // 挂一条 preconnect
-  function preconnectHost(origin, tries = 0) {
+  function preconnectHost(origin) {
     if (!origin || origin === location.origin) return;
     if (isDeadHost(origin)) return;
+    // document-start 时 head 可能未就绪，挂到 documentElement 同样生效，无需重试等待
     const parent = document.head || document.documentElement;
-    if (!parent) {
-      if (tries < 10) setTimeout(() => preconnectHost(origin, tries + 1), 20);
-      else console.warn('[色花堂缩略图] preconnect 放弃:', origin);
-      return;
-    }
     if (document.querySelector(`link[rel="preconnect"][href="${origin}"]`)) return;
     const link = document.createElement('link');
     link.rel = 'preconnect';
@@ -492,10 +495,6 @@
       this.settled++;
       if (failed) this.failed++;
       this.render();
-      if (this.settled >= this.total) {
-        clearTimeout(this.timer);
-        this.timer = setTimeout(() => this.hide(), PROGRESS_HIDE_DELAY);
-      }
     },
 
     // 手动重试成功：失败数减回一次，不动进度分母
@@ -510,11 +509,22 @@
       const done = this.settled >= this.total;
       el.classList.toggle('sehua-done', done && this.failed === 0);
       el.classList.toggle('sehua-partial', done && this.failed > 0);
-      if (!done) el.textContent = this.failed > 0
-        ? `缩略图已完成 ${this.settled}/${this.total}（${this.failed} 张失败）`
-        : `缩略图已完成 ${this.settled}/${this.total}`;
-      else if (this.failed > 0) el.textContent = `缩略图 ${this.total - this.failed}/${this.total}（${this.failed} 张失败）`;
-      else el.textContent = `缩略图 ${this.total} 张已加载`;
+      if (!done) {
+        // 未完成：撤掉可能挂着的淡出计时，恢复可见性，保证胶囊持续在线
+        clearTimeout(this.timer); this.timer = null;
+        el.style.opacity = '';
+        el.textContent = this.failed > 0
+          ? `缩略图已完成 ${this.settled}/${this.total}（${this.failed} 张失败）`
+          : `缩略图已完成 ${this.settled}/${this.total}`;
+        return;
+      }
+      el.textContent = this.failed > 0
+        ? `缩略图 ${this.total - this.failed}/${this.total}（${this.failed} 张失败）`
+        : `缩略图 ${this.total} 张已加载`;
+      // 完成态的淡出计时统一在这里武装：此前只放在 settle() 里，
+      // hide() 之后迟到 load 经 revive() 重建胶囊时会因无人再武装而永不消失
+      if (this.timer) return;
+      this.timer = setTimeout(() => { this.timer = null; this.hide(); }, PROGRESS_HIDE_DELAY);
     },
 
     mount() {
@@ -706,12 +716,8 @@
     return url + (url.indexOf('?') === -1 ? '?' : '&') + '_r=' + Date.now() + attempt;
   }
 
-  function setImgSrc(img, url) {
-    img.src = url;
-  }
-
   // 加载一张缩略图。manual=手动重试（不动进度分母）
-  function loadThumb(img, url, anchor, wrap, manual = false) {
+  function loadThumb(img, url, anchor, manual = false) {
     const origin = imageOrigin(url);
     let startedAt = 0;    // 本次请求真正发出的时刻（在途计时起点）
     let waitUsed = 0;     // 跨重试累计的在途等待毫秒；冷却/排队/退避不计入
@@ -757,14 +763,15 @@
           if (btn) btn.remove();
         } else {
           // 手动重试又挂了：恢复暗态 + 角标，还能再按
-          markFailedAnchor(anchor, url, wrap);
+          markFailedAnchor(anchor, url);
         }
       } else {
         thumbProgress.settle(failed);
-        if (failed) markFailedAnchor(anchor, url, wrap);
+        if (failed) markFailedAnchor(anchor, url);
       }
       // 结算时还没解出画面、之后数据才到的图：复核一次并撤回暗态与失败计数
-      if (failed) recheckAfterFail();
+      // skip 只是没试过（命中失败记忆/判死图床），不是真失败，无需复核
+      if (failed && outcome !== 'skip') recheckAfterFail();
     };
 
     // 失败后持续复核：数据迟到到达时撤回暗态和失败计数
@@ -803,7 +810,7 @@
         }
         const nextUrl = attemptUrl(url, attempt, refetch);
         // 地址没变才赋值（重赋同 URL 会取消在途请求）
-        if (img.getAttribute('src') !== nextUrl) setImgSrc(img, nextUrl);
+        if (img.getAttribute('src') !== nextUrl) img.src = nextUrl;
         if (img.complete) {
           const ok = img.naturalWidth > 0;
           done(!ok, ok ? 'ok' : 'cached-hard');
@@ -833,7 +840,9 @@
     function retryLater(hard) {
       attempt++;
       refetch = hard;   // 硬错误才换地址
-      waitUsed += performance.now() - startedAt;   // 累计在途时间，退避不计
+      // 累计在途时间，退避不计；startedAt=0（未派发就出错）时跳过，
+      // 防止把页面已运行时长灌进预算导致后续重试被立即判超时
+      if (startedAt) waitUsed += performance.now() - startedAt;
       releaseSlot();
       const delay = IMG_RETRY_BASE_MS * attempt + Math.floor(Math.random() * 400);
       timer = setTimeout(queueAttempt, delay);
@@ -842,7 +851,7 @@
     function onTimeout() {
       if (settled) return;
       clearTimeout(timer);
-      waitUsed += performance.now() - startedAt;
+      if (startedAt) waitUsed += performance.now() - startedAt;
       // 超时送 done() 判定是否真失败；不重发（重赋 src 会取消在途请求）
       done(true, 'timeout');
     }
@@ -880,7 +889,7 @@
   }
 
   // 失败兜底：暗色占位 + 角标重试按钮
-  function markFailedAnchor(anchor, url, wrap) {
+  function markFailedAnchor(anchor, url) {
     anchor.classList.add('sehua-failed');
     const img = anchor.querySelector('img');
     if (img) img.removeAttribute('src');   // 去裂图图标
@@ -894,28 +903,32 @@
       e.stopPropagation();   // 不跳详情页
       const cur = anchor.querySelector('img');
       if (!cur) return;
-      manualRetry(cur, url, anchor, wrap);
+      manualRetry(cur, url, anchor);
     });
     anchor.appendChild(btn);
   }
 
   // 手动重试：赦免失败记忆后换一个干净 img 重发
-  function manualRetry(img, url, anchor, wrap) {
+  function manualRetry(img, url, anchor) {
     const origin = imageOrigin(url);
     forgetImage(url);
     forgetHost(origin);
     hostFailStreak.delete(origin);
+    hostTimeoutStreak.delete(origin);
     hostCooldown.delete(origin);
     anchor.classList.remove('sehua-failed');
     const oldBtn = anchor.querySelector('.sehua-retry');
     if (oldBtn) oldBtn.remove();
 
-    // 克隆原节点保留站点设置的布局属性
+    // 克隆原节点保留站点设置的布局属性。
+    // 注意：守卫标记走 dataset（registerBodyImage 里设置），
+    // data-* 属性会被 cloneNode 复制，克隆节点因此不会被详情页
+    // MutationObserver 重复登记进加载引擎（expando 属性不会复制）
     const fresh = img.cloneNode(false);
     fresh.removeAttribute('src');
     anchor.replaceChild(fresh, img);
 
-    loadThumb(fresh, url, anchor, wrap, true);
+    loadThumb(fresh, url, anchor, true);
   }
 
   // 建缩略图容器并同步开始加载全部图片：移动版映射给出几张就注入几张
@@ -929,6 +942,7 @@
       const anchor = document.createElement('a');
       anchor.href = href;
       anchor.target = '_blank';
+      anchor.rel = 'noopener';
 
       const img = document.createElement('img');
       img.decoding = 'async';
@@ -936,7 +950,7 @@
       anchor.appendChild(img);
       wrap.appendChild(anchor);
 
-      loadThumb(img, url, anchor, wrap);
+      loadThumb(img, url, anchor);
     });
 
     return wrap;
@@ -1219,17 +1233,19 @@
 
   // 正文图登记进加载引擎：计入右下角进度，并沿用失败压暗 + 角标重试
   function registerBodyImage(img) {
-    if (!img || img.tagName !== 'IMG' || img._sehuaBody) return;
+    // 守卫标记走 dataset：cloneNode 会复制 data-* 属性但不复制 expando，
+    // 手动重试克隆出的新节点因此能带着标记逃过观察者的重复登记
+    if (!img || img.tagName !== 'IMG' || img.dataset.sehuaBody) return;
     const url = getRealSrc(img);
     if (!url) return;
     const origin = imageOrigin(url);
     // 站内图标、表情、头像不接管
-    if (!origin || origin === location.origin) { img._sehuaBody = true; return; }
+    if (!origin || origin === location.origin) { img.dataset.sehuaBody = '1'; return; }
     const wrap = img.parentElement;
     if (!wrap || wrap === document.body || wrap === document.documentElement) return;
-    img._sehuaBody = true;
+    img.dataset.sehuaBody = '1';
     img.decoding = 'async';
-    loadThumb(img, url, wrap, wrap);
+    loadThumb(img, url, wrap);
   }
 
   function loadBodyImages() {
