@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         色花堂精简
 // @namespace    http://98tang.com/
-// @version      1.2
-// @description  色花堂精简版：去广告；PC 列表页注入移动版缩略图（打开即全部加载）；详情页去懒加载/去滚动补图；检索页从详情页抽取缩略图（单帖最多试 5 次）+ 栏目过滤开关。
+// @version      1.3
+// @description  色花堂精简版：去广告；PC 列表页注入移动版缩略图（打开即全部加载）；详情页去懒加载/去滚动补图；检索页从详情页抽取缩略图 + 栏目过滤开关 + 搜索频繁拦截自动刷新重试（5 次）。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
 // @connect      bhagq.4yl7j.com
@@ -21,6 +21,7 @@
   const MAX_DETAIL_IMGS = 5;              // 单帖最多取几张图
   const BLOCK_FORUMS = ['求片问答悬赏区', '资源出售区', 'AI专区', '国产自拍', 'TXT小说下载'];
   const FILTER_STORAGE_KEY = 'sehuaFilterStateLite';
+  const BUSY_KEY = 'sehuaBusyRetryLite';
 
   /* ============================== 工具函数 ============================== */
 
@@ -112,7 +113,7 @@
     return { mapping: {} };
   }
 
-  // 从详情页抽图片地址；被拦/超时/解析失败最多试 5 次，全挂返回 null
+  // 从详情页抽图片地址；被拦/超时/解析失败最多试 2 次，全挂返回 null
   function fetchDetailImages(tid) {
     const attempt = () => new Promise(resolve => {
       GM_xmlhttpRequest({
@@ -136,10 +137,10 @@
       });
     });
     return (async () => {
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 2; i++) {
         const r = await attempt();
         if (r) return r;               // 拿到结果就走（空数组 = 帖子里没图）
-        if (i < 4) await sleep(2000);  // 被拦/超时：隔 2 秒再来
+        if (i < 1) await sleep(2000);  // 被拦/超时：隔 2 秒再来
       }
       return null;
     })();
@@ -306,11 +307,33 @@
     await loadDetailThumbs();
   }
 
+  // 搜索频繁拦截页（"搜索过于频繁…"）：倒计时后自动刷新，最多 5 次（计数存
+  // sessionStorage 跨刷新）；搜成功（无拦截文案）就清零，下一次重新计数
+  function searchBusyRetry() {
+    const mt = document.getElementById('messagetext');
+    if (!mt || !/(频繁|繁忙)/.test(mt.textContent)) { sessionStorage.removeItem(BUSY_KEY); return false; }
+    const n = (+sessionStorage.getItem(BUSY_KEY) || 0) + 1;
+    if (n > 5) { sessionStorage.removeItem(BUSY_KEY); return false; }
+    sessionStorage.setItem(BUSY_KEY, n);
+    const tip = document.createElement('div');
+    tip.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,.8);color:#fff;padding:16px 24px;border-radius:8px;font-size:14px;z-index:99999;text-align:center;';
+    let s = 4;
+    tip.textContent = `搜索频繁，${s} 秒后自动刷新（第 ${n}/5 次）...`;
+    document.body.appendChild(tip);
+    const t = setInterval(() => {
+      if (--s > 0) tip.textContent = `搜索频繁，${s} 秒后自动刷新（第 ${n}/5 次）...`;
+      else { clearInterval(t); location.reload(); }
+    }, 1000);
+    return true;
+  }
+
   /* ============================== 路由 ============================== */
 
   function onDomReady() {
-    if (location.pathname.indexOf('/search.php') !== -1) searchPageMain();
-    else if (location.pathname.indexOf('/thread-') !== -1 || location.search.indexOf('mod=viewthread') !== -1) detailPageMain();
+    if (location.pathname.indexOf('/search.php') !== -1) {
+      if (searchBusyRetry()) return;
+      searchPageMain();
+    } else if (location.pathname.indexOf('/thread-') !== -1 || location.search.indexOf('mod=viewthread') !== -1) detailPageMain();
     else if (location.pathname.indexOf('/forum.php') !== -1 && !location.search) removeUnused();
     else listPageMain();
   }
