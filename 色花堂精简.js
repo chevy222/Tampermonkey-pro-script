@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         色花堂精简
 // @namespace    http://98tang.com/
-// @version      1.3
-// @description  色花堂精简版：去广告；PC 列表页注入移动版缩略图（打开即全部加载）；详情页去懒加载/去滚动补图；检索页从详情页抽取缩略图 + 栏目过滤开关 + 搜索频繁拦截自动刷新重试（5 次）。
+// @version      1.4
+// @description  色花堂精简版：去广告；PC 列表页注入移动版缩略图（打开即全部加载）；详情页去懒加载/去滚动补图；检索页从详情页抽取缩略图 + 栏目过滤开关 + 搜索繁忙拦截自动刷新重试（5 次）。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
 // @connect      bhagq.4yl7j.com
@@ -307,21 +307,22 @@
     await loadDetailThumbs();
   }
 
-  // 搜索频繁拦截页（"搜索过于频繁…"）：倒计时后自动刷新，最多 5 次（计数存
-  // sessionStorage 跨刷新）；搜成功（无拦截文案）就清零，下一次重新计数
+  // 搜索繁忙拦截页：倒计时后自动刷新，最多 5 次（计数存 sessionStorage 跨刷新）。
+  // 只认"搜索繁忙"（瞬时繁忙，重试有意义——原脚本同款匹配）；
+  // "搜索过于频繁…限制搜索间隔120秒"是硬冷却，重试无用，不匹配也不碰
   function searchBusyRetry() {
-    const mt = document.getElementById('messagetext');
-    if (!mt || !/(频繁|繁忙)/.test(mt.textContent)) { sessionStorage.removeItem(BUSY_KEY); return false; }
+    const box = document.getElementById('messagetext') || document.querySelector('.alert_error, .alert_info');
+    if (!box || !box.textContent.includes('搜索繁忙')) { sessionStorage.removeItem(BUSY_KEY); return false; }
     const n = (+sessionStorage.getItem(BUSY_KEY) || 0) + 1;
     if (n > 5) { sessionStorage.removeItem(BUSY_KEY); return false; }
     sessionStorage.setItem(BUSY_KEY, n);
     const tip = document.createElement('div');
     tip.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,.8);color:#fff;padding:16px 24px;border-radius:8px;font-size:14px;z-index:99999;text-align:center;';
     let s = 4;
-    tip.textContent = `搜索频繁，${s} 秒后自动刷新（第 ${n}/5 次）...`;
+    tip.textContent = `搜索繁忙，${s} 秒后自动刷新（第 ${n}/5 次）...`;
     document.body.appendChild(tip);
     const t = setInterval(() => {
-      if (--s > 0) tip.textContent = `搜索频繁，${s} 秒后自动刷新（第 ${n}/5 次）...`;
+      if (--s > 0) tip.textContent = `搜索繁忙，${s} 秒后自动刷新（第 ${n}/5 次）...`;
       else { clearInterval(t); location.reload(); }
     }, 1000);
     return true;
