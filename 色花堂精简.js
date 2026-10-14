@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         色花堂精简
 // @namespace    http://98tang.com/
-// @version      1.5
-// @description  色花堂精简版：去广告；PC 列表页注入移动版缩略图（打开即全部加载）；详情页去懒加载/去滚动补图；检索页从详情页抽取缩略图 + 栏目过滤开关 + 搜索繁忙拦截自动刷新重试（5 次）。
+// @version      1.6
+// @description  色花堂精简版：去广告；PC 列表页注入移动版缩略图（打开即全部加载、宽屏单列、发帖日期搬到标题下）；详情页去懒加载/去滚动补图；检索页从详情页抽取缩略图 + 栏目过滤开关 + 搜索繁忙拦截自动刷新重试（5 次）。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
 // @connect      bhagq.4yl7j.com
@@ -97,9 +97,14 @@
   })();
 
   const THUMB_CSS = `
+    .wp { width: 100% !important; margin: 0 !important; box-sizing: border-box !important; }
+    #nv { width: 100% !important; left: 0 !important; right: 0 !important; }
+    #ct { width: auto !important; margin: 0 !important; padding: 0 10px !important; box-sizing: border-box !important; }
+    body { overflow-x: hidden !important; }
     .sehua-thumb { --img-width: 50%; display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 8px; }
     .sehua-thumb img { height: auto !important; aspect-ratio: 3/2; object-fit: cover; border-radius: 4px; border: 1px solid #ddd; background: #f5f5f5; box-sizing: border-box !important; width: 100% !important; }
     .sehua-thumb > a { display: flex; align-items: center; justify-content: center; text-decoration: none; width: var(--img-width) !important; position: relative; }
+    .sehua-date { display: inline-block; margin: 4px 0 0 8px; font-size: 12px; color: #999; }
   `;
 
   function createThumbWrap(tid, urls) {
@@ -140,8 +145,12 @@
     document.querySelectorAll('#threadlisttableid tr').forEach(tr => {
       const tbody = tr.closest('tbody[id^=normalthread_], tbody[id^=stickthread_]');
       const th = tr.querySelector('th');
-      const tid = tbody && (tbody.id.match(/\d+/) || [])[0];
-      if (tid && th && map[tid] && !th.querySelector('.sehua-thumb')) th.appendChild(createThumbWrap(tid, map[tid]));
+      if (!tbody || !th) return;
+      const em = tr.querySelector('td.by em');   // 发帖时间搬到标题下
+      if (em) { em.className = 'sehua-date'; th.appendChild(em); }
+      tr.querySelectorAll('td').forEach(td => td.remove());   // 单列化：删掉作者/回复等列
+      const tid = (tbody.id.match(/\d+/) || [])[0];
+      if (tid && map[tid] && !th.querySelector('.sehua-thumb')) th.appendChild(createThumbWrap(tid, map[tid]));
     });
   }
 
