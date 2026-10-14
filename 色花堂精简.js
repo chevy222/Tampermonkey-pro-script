@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂精简
 // @namespace    http://98tang.com/
-// @version      1.10
+// @version      1.11
 // @description  色花堂精简版：去广告；PC 列表页注入移动版缩略图（打开即全部加载、宽屏单列、发帖日期搬到标题下）；详情页宽屏、正文撑满居中、去懒加载/去滚动补图；检索页宽屏、从详情页抽取缩略图 + 栏目过滤开关 + 搜索繁忙拦截自动刷新重试（5 次）。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -30,15 +30,10 @@
 
   // 带移动 UA 的 GET；被 safeid 挑战页拦下或解析抛错都返回 null
   const gmGet = (url, parse) => new Promise(resolve => GM_xmlhttpRequest({
-    url,
-    timeout: 15000,
+    url, timeout: 15000,
     headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36', 'Cookie': 'mobile=2' },
-    onload: resp => {
-      try { resolve(resp.responseText.includes('safeid') ? null : parse(resp.responseText)); }
-      catch (e) { resolve(null); }
-    },
-    ontimeout: () => resolve(null),
-    onerror: () => resolve(null)
+    onload: resp => { try { resolve(resp.responseText.includes('safeid') ? null : parse(resp.responseText)); } catch (e) { resolve(null); } },
+    ontimeout: () => resolve(null), onerror: () => resolve(null)
   }));
 
   // 移动版触屏模板 -> 帖子tid映射（筛选参数透传）；被拦/为空返回 null 由调用方重试
@@ -99,12 +94,10 @@
     addStyle(THUMB_CSS + ' #threadlisttableid { table-layout: fixed !important; width: 100% !important; } #threadlisttableid th { width: 100% !important; padding-right: 12px; }');
     removeUnused();
     // 掐掉 autoloadpage.js 的 AJAX 翻页（绑在 onclick 上），走 href 整页跳转
-    const autopbn = document.getElementById('autopbn');
-    if (autopbn) autopbn.onclick = null;
+    const autopbn = document.getElementById('autopbn'); if (autopbn) autopbn.onclick = null;
 
-    const page = m ? +m[2] : (+p.get('page') || 1);
     let map = {};
-    for (let i = 0; i < 2 && !Object.keys(map).length; i++) { if (i) await sleep(1500); map = await fetchMobileThumbs(fid, page) || {}; }
+    for (let i = 0; i < 2 && !Object.keys(map).length; i++) { if (i) await sleep(1500); map = await fetchMobileThumbs(fid, m ? +m[2] : (+p.get('page') || 1)) || {}; }
     document.querySelectorAll('#threadlisttableid tr').forEach(tr => {
       const tbody = tr.closest('tbody[id^=normalthread_], tbody[id^=stickthread_]'), th = tr.querySelector('th');
       if (!tbody || !th) return;
@@ -121,10 +114,7 @@
     if (!document.getElementById('postlist')) return;
     addStyle(WIDE_CSS + ' #postlist { width: 100% !important; } #postlist ignore_js_op { text-align: center; } #postlist ignore_js_op img.zoom { display: block; margin-left: auto; margin-right: auto; } #postlist div[style*="loading.gif"] { margin: 0 auto; }');
     removeUnused();
-    document.querySelectorAll('#postlist img[file]').forEach(img => {
-      if (!img.getAttribute('src') || isPlaceholder(img.getAttribute('src'))) img.setAttribute('src', img.getAttribute('file'));
-      img.setAttribute('lazyloaded', 'true');
-    });
+    document.querySelectorAll('#postlist img[file]').forEach(img => { const c = img.getAttribute('src'); if (!c || isPlaceholder(c)) img.setAttribute('src', img.getAttribute('file')); img.setAttribute('lazyloaded', 'true'); });
   }
 
   // 栏目过滤开关：勾选的栏目隐藏对应结果，状态记在本地
@@ -145,8 +135,7 @@
     const hidden = {};
     document.querySelectorAll('.sehua-forum-switch input:checked').forEach(cb => hidden[cb.dataset.forum] = 1);
     document.querySelectorAll('#threadlist li.pbw').forEach(li => {
-      const fl = li.querySelector('a[href*=forum-]');
-      li.style.display = hidden[fl ? fl.textContent.trim() : ''] ? 'none' : '';
+      const fl = li.querySelector('a[href*=forum-]'); li.style.display = hidden[fl ? fl.textContent.trim() : ''] ? 'none' : '';
     });
   }
 
@@ -158,17 +147,14 @@
     if (loadingThumbs) { pendingReload = true; return; }
     loadingThumbs = true;
     try {
-      const targets = [...document.querySelectorAll('#threadlist li.pbw')]
-        .filter(li => li.style.display !== 'none' && !li.querySelector('.sehua-thumb') && !li.dataset.sehuaChecked);
+      const targets = [...document.querySelectorAll('#threadlist li.pbw')].filter(li => li.style.display !== 'none' && !li.querySelector('.sehua-thumb') && !li.dataset.sehuaChecked);
       let i = 0;
       await Promise.all(Array.from({ length: 5 }, async () => {
         while (i < targets.length) {
           const li = targets[i++];
           const tid = (li.id.match(/\d+/) || [])[0];
           if (!tid) continue;
-          const tip = li.appendChild(document.createElement('div'));
-          tip.className = 'sehua-loading';
-          tip.textContent = '加载中...';
+          const tip = Object.assign(li.appendChild(document.createElement('div')), { className: 'sehua-loading', textContent: '加载中...' });
           try {
             const urls = await fetchDetailImages(tid);
             if (urls === null) continue;
@@ -191,8 +177,7 @@
     if (!bar) return;
     bar.querySelectorAll('input').forEach(cb => cb.addEventListener('change', () => {
       applyFilter();
-      const st = {};
-      document.querySelectorAll('.sehua-forum-switch input').forEach(c => st[c.dataset.forum] = c.checked);
+      const st = {}; document.querySelectorAll('.sehua-forum-switch input').forEach(c => st[c.dataset.forum] = c.checked);
       try { localStorage.setItem('sehuaFilterStateLite', JSON.stringify(st)); } catch (e) {}
       loadDetailThumbs();
     }));
@@ -210,8 +195,7 @@
     sessionStorage.setItem('sehuaBusyRetryLite', n);
     const tip = document.body.appendChild(document.createElement('div'));
     tip.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,.8);color:#fff;padding:16px 24px;border-radius:8px;font-size:14px;z-index:99999;text-align:center;';
-    let s = 4;
-    tip.textContent = `搜索繁忙，${s} 秒后自动刷新（第 ${n}/5 次）...`;
+    let s = 4; tip.textContent = `搜索繁忙，${s} 秒后自动刷新（第 ${n}/5 次）...`;
     const t = setInterval(() => { if (--s > 0) tip.textContent = `搜索繁忙，${s} 秒后自动刷新（第 ${n}/5 次）...`; else { clearInterval(t); location.reload(); } }, 1000);
     return true;
   }
