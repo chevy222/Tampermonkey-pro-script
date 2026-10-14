@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂精简
 // @namespace    http://98tang.com/
-// @version      1.4
+// @version      1.5
 // @description  色花堂精简版：去广告；PC 列表页注入移动版缩略图（打开即全部加载）；详情页去懒加载/去滚动补图；检索页从详情页抽取缩略图 + 栏目过滤开关 + 搜索繁忙拦截自动刷新重试（5 次）。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -13,28 +13,18 @@
 (function () {
   'use strict';
 
-  /* ============================== 可调参数 ============================== */
-
   const MOBILE_UA = 'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36';
-  const REQUEST_TIMEOUT = 15000;          // 单次请求超时
-  const MAX_CONCURRENT = 5;               // 检索页详情抽取并发
-  const MAX_DETAIL_IMGS = 5;              // 单帖最多取几张图
-  const BLOCK_FORUMS = ['求片问答悬赏区', '资源出售区', 'AI专区', '国产自拍', 'TXT小说下载'];
-  const FILTER_STORAGE_KEY = 'sehuaFilterStateLite';
-  const BUSY_KEY = 'sehuaBusyRetryLite';
 
-  /* ============================== 工具函数 ============================== */
+  // 站内装饰图特征：静态图标、用户头像、占位图
+  const isPlaceholder = url => ['static/image', 'uc_server', 'none.gif', 'thumb-ing'].some(m => url.includes(m));
 
-  function isPlaceholder(url) {
-    return ['static/image', 'uc_server', 'none.gif', 'thumb-ing'].some(m => url.includes(m));
-  }
-
-  function normalizeHttpUrl(val) {
+  const normalizeHttpUrl = val => {
+    if (!val) return null;   // 属性缺失时 getAttribute 返回 null，别让 new URL 把它串成"null"
     try {
       const u = new URL(val, location.href);
       return (u.protocol === 'http:' || u.protocol === 'https:') ? u.href : null;
     } catch (e) { return null; }
-  }
+  };
 
   // 从 img 上取真实图片地址（依次探测 data 属性，最后退回 src）
   function getRealSrc(img) {
@@ -46,107 +36,65 @@
     return (url && !isPlaceholder(url)) ? url : null;
   }
 
-  // 当前页面的论坛 ID 与页码（forum-95-2.html 与 ?fid=95&page=2 两种形式）
-  function getPageInfo() {
-    const m = location.href.match(/forum-(\d+)-(\d+)\.html/);
-    if (m) return { fid: m[1], page: +m[2] };
-    const p = new URLSearchParams(location.search);
-    return { fid: p.get('fid'), page: +p.get('page') || 1 };
-  }
-
   const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const addStyle = css => document.head.insertAdjacentHTML('beforeend', `<style>${css}</style>`);
 
-  // 并发池：限制同时进行的任务数
-  async function pool(items, limit, fn) {
+  // 并发池：最多 5 个任务同时进行
+  async function pool(items, fn) {
     let i = 0;
-    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    await Promise.all(Array.from({ length: Math.min(5, items.length) }, async () => {
       while (i < items.length) await fn(items[i++]);
     }));
   }
 
-  function addStyle(css) {
-    const s = document.createElement('style');
-    s.textContent = css;
-    (document.head || document.documentElement).appendChild(s);
-  }
+  // 带移动 UA 的 GET；被 safeid 挑战页拦下或解析抛错都返回 null
+  const gmGet = (url, parse) => new Promise(resolve => GM_xmlhttpRequest({
+    method: 'GET',
+    url,
+    timeout: 15000,
+    headers: { 'User-Agent': MOBILE_UA, 'Cookie': 'mobile=2' },
+    onload: resp => {
+      try { resolve(resp.responseText.includes('safeid') ? null : parse(resp.responseText)); }
+      catch (e) { resolve(null); }
+    },
+    ontimeout: () => resolve(null),
+    onerror: () => resolve(null)
+  }));
 
-  /* ============================== 取图 ============================== */
-
-  // 带移动 UA 请求触屏模板，解析出 帖子tid -> 缩略图列表；被拦/超时返回 null
-  function fetchMobileThumbs(fid, page) {
-    return new Promise(resolve => {
-      const sp = new URLSearchParams(location.search);
-      const pairs = ['mobile=2'];
-      ['filter', 'orderby', 'typeid', 'specialtype'].forEach(k => { if (sp.get(k)) pairs.push(k + '=' + encodeURIComponent(sp.get(k))); });
-      GM_xmlhttpRequest({
-        method: 'GET',
-        url: `https://${location.hostname}/forum-${fid}-${page}.html?${pairs.join('&')}`,
-        timeout: REQUEST_TIMEOUT,
-        headers: { 'User-Agent': MOBILE_UA, 'Cookie': 'mobile=2' },
-        onload(resp) {
-          if (resp.responseText.includes('safeid')) return resolve(null);
-          try {
-            const mapping = {};
-            new DOMParser().parseFromString(resp.responseText, 'text/html').querySelectorAll('.n5_htmk').forEach(el => {
-              const tid = (el.querySelector('a[href*=viewthread]')?.href.match(/tid=(\d+)/) || [])[1];
-              if (!tid) return;
-              const urls = [];
-              el.querySelectorAll('img').forEach(img => { const s = getRealSrc(img); if (s && !urls.includes(s)) urls.push(s); });
-              if (urls.length) mapping[tid] = urls;
-            });
-            resolve({ mapping });
-          } catch (e) { resolve(null); }
-        },
-        ontimeout: () => resolve(null),
-        onerror: () => resolve(null)
+  // 移动版触屏模板 -> 帖子tid映射（筛选参数透传）；被拦/为空返回 null 由调用方重试
+  const fetchMobileThumbs = (fid, page) => {
+    const sp = new URLSearchParams(location.search);
+    const pairs = ['mobile=2'];
+    ['filter', 'orderby', 'typeid', 'specialtype'].forEach(k => { if (sp.get(k)) pairs.push(k + '=' + encodeURIComponent(sp.get(k))); });
+    return gmGet(`https://${location.hostname}/forum-${fid}-${page}.html?${pairs.join('&')}`, text => {
+      const mapping = {};
+      new DOMParser().parseFromString(text, 'text/html').querySelectorAll('.n5_htmk').forEach(el => {
+        const tid = (el.querySelector('a[href*=viewthread]')?.href.match(/tid=(\d+)/) || [])[1];
+        if (!tid) return;
+        const urls = [];
+        el.querySelectorAll('img').forEach(img => { const s = getRealSrc(img); if (s && !urls.includes(s)) urls.push(s); });
+        if (urls.length) mapping[tid] = urls;
       });
+      return Object.keys(mapping).length ? mapping : null;
     });
-  }
+  };
 
-  // 移动版映射：最多试 2 次
-  async function fetchMobileMapping(fid, page) {
+  // 详情页抽图；被拦/超时最多试 2 次
+  const fetchDetailImages = tid => (async () => {
     for (let i = 0; i < 2; i++) {
-      const r = await fetchMobileThumbs(fid, page);
-      if (r && Object.keys(r.mapping).length) return r;
-      if (i < 1) await sleep(1500);
-    }
-    return { mapping: {} };
-  }
-
-  // 从详情页抽图片地址；被拦/超时/解析失败最多试 2 次，全挂返回 null
-  function fetchDetailImages(tid) {
-    const attempt = () => new Promise(resolve => {
-      GM_xmlhttpRequest({
-        method: 'GET',
-        url: `https://${location.hostname}/forum.php?mod=viewthread&tid=${tid}`,
-        timeout: REQUEST_TIMEOUT,
-        headers: { 'User-Agent': MOBILE_UA, 'Cookie': 'mobile=2' },
-        onload(resp) {
-          if (resp.responseText.includes('safeid')) return resolve(null);
-          try {
-            const urls = [];
-            new DOMParser().parseFromString(resp.responseText, 'text/html').querySelectorAll('.t_f img, .pcb img, .message img').forEach(img => {
-              const u = getRealSrc(img);
-              if (u && !urls.includes(u) && urls.length < MAX_DETAIL_IMGS) urls.push(u);
-            });
-            resolve(urls);
-          } catch (e) { resolve(null); }
-        },
-        ontimeout: () => resolve(null),
-        onerror: () => resolve(null)
+      const r = await gmGet(`https://${location.hostname}/forum.php?mod=viewthread&tid=${tid}`, text => {
+        const urls = [];
+        new DOMParser().parseFromString(text, 'text/html').querySelectorAll('.t_f img, .pcb img, .message img').forEach(img => {
+          const u = getRealSrc(img);
+          if (u && !urls.includes(u) && urls.length < 5) urls.push(u);
+        });
+        return urls;
       });
-    });
-    return (async () => {
-      for (let i = 0; i < 2; i++) {
-        const r = await attempt();
-        if (r) return r;               // 拿到结果就走（空数组 = 帖子里没图）
-        if (i < 1) await sleep(2000);  // 被拦/超时：隔 2 秒再来
-      }
-      return null;
-    })();
-  }
-
-  /* ============================== 缩略图注入 ============================== */
+      if (r) return r;               // 拿到结果就走（空数组 = 帖子里没图）
+      if (i < 1) await sleep(2000);  // 被拦/超时：隔 2 秒再来
+    }
+    return null;
+  })();
 
   const THUMB_CSS = `
     .sehua-thumb { --img-width: 50%; display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 8px; }
@@ -158,36 +106,20 @@
     const wrap = document.createElement('div');
     wrap.className = 'sehua-thumb';
     wrap.style.setProperty('--img-width', urls.length <= 1 ? '50%' : `calc((100% - ${(urls.length - 1) * 8}px) / ${urls.length})`);
-    const href = `https://${location.hostname}/thread-${tid}-1-1.html`;
-    urls.forEach(url => {
-      const a = document.createElement('a');
-      a.href = href;
-      a.target = '_blank';
-      a.rel = 'noopener';
-      const img = document.createElement('img');
-      img.src = url;               // 直接加载：打开页面就开始下，不用懒加载
-      a.appendChild(img);
-      wrap.appendChild(a);
-    });
+    wrap.innerHTML = urls.map(u => `<a href="https://${location.hostname}/thread-${tid}-1-1.html" target="_blank" rel="noopener"><img src="${u}"></a>`).join('');
     return wrap;
   }
 
-  /* ============================== 去广告 ============================== */
-
+  // 去广告：垃圾元素 + 表格里非帖子行（公告/空表头/广告行）
   function removeUnused() {
     document.querySelectorAll('.show-text.cl, .show-text2, .show-text4, #f_pst, .wp.mtn, .h10, #newspecial, #newspecialtmp').forEach(el => el.remove());
-    // 表格里不属于帖子的行整块移除：公告行、空表头行、广告行
-    document.querySelectorAll('#threadlisttableid tbody').forEach(tb => {
-      if (/^(normalthread_|stickthread_)/.test(tb.id)) return;
-      if (tb.querySelector('.pg')) return;
-      tb.remove();
-    });
+    document.querySelectorAll('#threadlisttableid tbody:not([id^=normalthread_]):not([id^=stickthread_])').forEach(tb => { if (!tb.querySelector('.pg')) tb.remove(); });
   }
 
-  /* ============================== 列表页 ============================== */
-
   async function listPageMain() {
-    const { fid, page } = getPageInfo();
+    const m = location.href.match(/forum-(\d+)-(\d+)\.html/);
+    const p = new URLSearchParams(location.search);
+    const fid = m ? m[1] : p.get('fid');
     if (!fid || !document.getElementById('threadlisttableid')) return;
 
     addStyle(THUMB_CSS + `
@@ -195,47 +127,33 @@
       #threadlisttableid th { width: 100% !important; padding-right: 12px; }
     `);
     removeUnused();
-    // 掐掉 autoloadpage.js 的 AJAX 翻页（它绑在 onclick 上），走 href 整页跳转
+    // 掐掉 autoloadpage.js 的 AJAX 翻页（绑在 onclick 上），走 href 整页跳转
     const autopbn = document.getElementById('autopbn');
     if (autopbn) autopbn.onclick = null;
 
-    const { mapping } = await fetchMobileMapping(fid, page);
+    let map = {};
+    for (let i = 0; i < 2; i++) {
+      if (i) await sleep(1500);
+      map = await fetchMobileThumbs(fid, m ? +m[2] : (+p.get('page') || 1)) || {};
+      if (Object.keys(map).length) break;
+    }
     document.querySelectorAll('#threadlisttableid tr').forEach(tr => {
       const tbody = tr.closest('tbody[id^=normalthread_], tbody[id^=stickthread_]');
       const th = tr.querySelector('th');
       const tid = tbody && (tbody.id.match(/\d+/) || [])[0];
-      if (tid && th && mapping[tid] && !th.querySelector('.sehua-thumb')) th.appendChild(createThumbWrap(tid, mapping[tid]));
+      if (tid && th && map[tid] && !th.querySelector('.sehua-thumb')) th.appendChild(createThumbWrap(tid, map[tid]));
     });
   }
 
-  /* ============================== 详情页 ============================== */
-
-  // 单张正文图：占位符换成真地址，打上 lazyloaded 标记（站点的滚动加载器跳过它）
-  function fixLazyImg(img) {
-    const real = img.getAttribute('file');
-    const cur = img.getAttribute('src');
-    if (real && (!cur || isPlaceholder(cur))) img.setAttribute('src', real);
-    img.setAttribute('lazyloaded', 'true');
-  }
-
-  // 去懒加载 + 去滚动补图：加载后的占位图全部立即换真地址。
-  // 实测 #postlist 不会动态插入图片，不需要 MutationObserver
+  // 详情页去懒加载 + 去滚动补图：占位图立即换真地址并打 lazyloaded 标记（站点滚动加载器跳过它）
   function detailPageMain() {
     if (!document.getElementById('postlist')) return;
     removeUnused();
-    document.querySelectorAll('#postlist img[file]').forEach(fixLazyImg);
-  }
-
-  /* ============================== 检索页 ============================== */
-
-  function loadFilterState() {
-    try { return JSON.parse(localStorage.getItem(FILTER_STORAGE_KEY) || '{}'); } catch (e) { return {}; }
-  }
-
-  function saveFilterState() {
-    const st = {};
-    document.querySelectorAll('.sehua-forum-switch input').forEach(cb => { st[cb.dataset.forum] = cb.checked; });
-    try { localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(st)); } catch (e) {}
+    document.querySelectorAll('#postlist img[file]').forEach(img => {
+      const cur = img.getAttribute('src');
+      if (!cur || isPlaceholder(cur)) img.setAttribute('src', img.getAttribute('file'));
+      img.setAttribute('lazyloaded', 'true');
+    });
   }
 
   // 栏目过滤开关：勾选的栏目隐藏对应结果，状态记在本地
@@ -246,8 +164,9 @@
     const wrap = document.createElement('div');
     wrap.className = 'sehua-forum-switch';
     wrap.style.cssText = 'display:flex; gap:12px; align-items:center; font-size:12px;';
-    const saved = loadFilterState();
-    BLOCK_FORUMS.forEach(name => {
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem('sehuaFilterStateLite') || '{}'); } catch (e) {}
+    ['求片问答悬赏区', '资源出售区', 'AI专区', '国产自拍', 'TXT小说下载'].forEach(name => {
       wrap.insertAdjacentHTML('beforeend', `<label style="display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none;"><input type="checkbox" data-forum="${name}"${(saved[name] ?? true) ? ' checked' : ''}><span>隐藏${name}</span></label>`);
     });
     sttl.appendChild(wrap);
@@ -273,13 +192,12 @@
     try {
       const targets = [...document.querySelectorAll('#threadlist li.pbw')]
         .filter(li => li.style.display !== 'none' && !li.querySelector('.sehua-thumb') && !li.dataset.sehuaChecked);
-      await pool(targets, MAX_CONCURRENT, async li => {
+      await pool(targets, async li => {
         const tid = (li.id.match(/\d+/) || [])[0];
         if (!tid) return;
-        const tip = document.createElement('div');
+        const tip = li.appendChild(document.createElement('div'));
         tip.className = 'sehua-loading';
         tip.textContent = '加载中...';
-        li.appendChild(tip);
         try {
           const urls = await fetchDetailImages(tid);
           if (urls === null) return;
@@ -302,25 +220,29 @@
     if (!document.querySelector('#threadlist li.pbw')) return;
     const bar = addForumSwitches();
     if (!bar) return;
-    bar.querySelectorAll('input').forEach(cb => cb.addEventListener('change', () => { applyFilter(); saveFilterState(); loadDetailThumbs(); }));
+    bar.querySelectorAll('input').forEach(cb => cb.addEventListener('change', () => {
+      applyFilter();
+      const st = {};
+      document.querySelectorAll('.sehua-forum-switch input').forEach(c => { st[c.dataset.forum] = c.checked; });
+      try { localStorage.setItem('sehuaFilterStateLite', JSON.stringify(st)); } catch (e) {}
+      loadDetailThumbs();
+    }));
     applyFilter();
     await loadDetailThumbs();
   }
 
   // 搜索繁忙拦截页：倒计时后自动刷新，最多 5 次（计数存 sessionStorage 跨刷新）。
-  // 只认"搜索繁忙"（瞬时繁忙，重试有意义——原脚本同款匹配）；
-  // "搜索过于频繁…限制搜索间隔120秒"是硬冷却，重试无用，不匹配也不碰
+  // 只认"搜索繁忙"（瞬时繁忙，重试有意义）；"搜索过于频繁…120秒"是冷却，不碰
   function searchBusyRetry() {
     const box = document.getElementById('messagetext') || document.querySelector('.alert_error, .alert_info');
-    if (!box || !box.textContent.includes('搜索繁忙')) { sessionStorage.removeItem(BUSY_KEY); return false; }
-    const n = (+sessionStorage.getItem(BUSY_KEY) || 0) + 1;
-    if (n > 5) { sessionStorage.removeItem(BUSY_KEY); return false; }
-    sessionStorage.setItem(BUSY_KEY, n);
-    const tip = document.createElement('div');
+    if (!box || !box.textContent.includes('搜索繁忙')) { sessionStorage.removeItem('sehuaBusyRetryLite'); return false; }
+    const n = (+sessionStorage.getItem('sehuaBusyRetryLite') || 0) + 1;
+    if (n > 5) { sessionStorage.removeItem('sehuaBusyRetryLite'); return false; }
+    sessionStorage.setItem('sehuaBusyRetryLite', n);
+    const tip = document.body.appendChild(document.createElement('div'));
     tip.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,.8);color:#fff;padding:16px 24px;border-radius:8px;font-size:14px;z-index:99999;text-align:center;';
     let s = 4;
     tip.textContent = `搜索繁忙，${s} 秒后自动刷新（第 ${n}/5 次）...`;
-    document.body.appendChild(tip);
     const t = setInterval(() => {
       if (--s > 0) tip.textContent = `搜索繁忙，${s} 秒后自动刷新（第 ${n}/5 次）...`;
       else { clearInterval(t); location.reload(); }
@@ -328,20 +250,15 @@
     return true;
   }
 
-  /* ============================== 路由 ============================== */
-
   function onDomReady() {
-    if (location.pathname.indexOf('/search.php') !== -1) {
+    if (location.pathname.includes('/search.php')) {
       if (searchBusyRetry()) return;
       searchPageMain();
-    } else if (location.pathname.indexOf('/thread-') !== -1 || location.search.indexOf('mod=viewthread') !== -1) detailPageMain();
-    else if (location.pathname.indexOf('/forum.php') !== -1 && !location.search) removeUnused();
+    } else if (location.pathname.includes('/thread-') || location.search.includes('mod=viewthread')) detailPageMain();
+    else if (location.pathname.includes('/forum.php') && !location.search) removeUnused();
     else listPageMain();
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', onDomReady, { once: true });
-  } else {
-    onDomReady();
-  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', onDomReady, { once: true });
+  else onDomReady();
 })();
