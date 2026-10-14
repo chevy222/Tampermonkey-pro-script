@@ -15,11 +15,10 @@
 
     /* ============================== 可调参数 ============================== */
 
-    // 版本号，document-start 阶段写到 <html data-t2048="..."> 上（兼作双注入哨兵）
+    // 版本号，写到 <html data-t2048="..."> 上，兼作双注入哨兵
     const VERSION = '3.16';
 
-    // 防双注入（Tampermonkey 装重 / 多渠道注入）：先占位，后到的实例原路退出。
-    // 两个实例的 observer 会互相 resetImage 涨 _gen，把对方的加载闭包全部短路，图永远不结算
+    // 防双注入：先占位，后到的实例原路退出
     if (document.documentElement.getAttribute('data-t2048')) return;
     document.documentElement.setAttribute('data-t2048', VERSION);
 
@@ -27,10 +26,7 @@
     const DEBUG = false;
     const log = (...args) => { if (DEBUG) console.log('[2048缩略图]', ...args); };
 
-    // 同时在途的图片请求数上限（0 = 不限制）
-    // 16：检索页常见 10+ 个图床，若只给 8，单域上限 6 的一个大图床就占掉 6 席，
-    // 其余图床只能抢 2 席——整页吞吐被锁死，饥饿图床还会攒超时误触熔断。
-    // 真实并发仍由 PER_HOST_IN_FLIGHT 分池控制，这里只是别让全局闸成为瓶颈。
+    // 全局在途请求数上限（真实并发由 PER_HOST_IN_FLIGHT 分池控制）
     const MAX_IMG_IN_FLIGHT = 16;
 
     // 单图失败重试次数与退避基数（另加 0~400ms 抖动）
@@ -42,26 +38,17 @@
 
     // 同一图床连续硬失败这么多次即判不可达，该域名未开始的图直接跳过；任一成功即清零
     const HOST_FAIL_THRESHOLD = 3;
-    // 同一图床连续「超时」这么多次同样判不可达；取值为一个并发窗口（PER_HOST_IN_FLIGHT），
-    // 使整窗同时挂住的场景在第一批即可熔断
-    // 同一图床连续「超时」这么多次判为不可用。取两个并发窗口的大小：
-    // 单个窗口的图全部超时属于「这一批恰好很慢」，不足以判定整个图床不可用
+    // 同一图床连续超时这么多次也判不可用；取两个并发窗口大小，单窗全慢不算数
     const HOST_TIMEOUT_THRESHOLD = 12;
 
-    // 图床熔断的冷却时长与轮次：熔断只做冷却，冷却结束自动重开、继续派发；
-    // 连续这么多轮冷却后仍拿不到一次成功，才在本次页面加载内彻底放弃
+    // 图床熔断冷却时长与轮次：冷却结束自动重开，连续多轮仍无成功才彻底放弃
     const HOST_COOLDOWN_MS = 10000;
     const HOST_COOLDOWN_ROUNDS = 3;
 
-    // 单域名在途上限。Chrome 对同一 origin 的 HTTP/1.1 只给约 6 条连接，
-    // 全局上限放任不管会让多余的请求滞留在浏览器 socket 队列里空等，
-    // 而脚本的等待计时照跑 → 未真正发出的请求被误判超时 → 重试 → 更堵。
+    // 单域名在途上限，避免单个图床占满浏览器连接
     const PER_HOST_IN_FLIGHT = 6;
 
-    // ============ 失败记忆（localStorage） ============
-    // 记住加载失败的图与判死的图床，刷新页面后直接跳过，不再重复重试。
-    // 图床以 HOST_KEY_PREFIX + origin 的形式和图片共用同一张表，
-    // 因此清掉 BAD_IMAGE_KEY 会把图级与图床级记忆一起清掉
+    // 记住加载失败的图与判死的图床，刷新页面后直接跳过。图床与图片共用同一张表
     const BAD_IMAGE_KEY = 't2048BadImages';
     const BAD_IMAGE_TTL = 5 * 60 * 1000;      // 硬失败（404 / 连接被拒）的记忆时长
     const BAD_IMAGE_MAX = 300;
@@ -72,9 +59,7 @@
     // 全部加载完后延迟多久开始淡出进度条
     const PROGRESS_HIDE_DELAY_MS = 2500;
 
-    // 广告与无用块，命中即整块移除
-    // .reward-card：帖子下方的「打赏楼主」推广卡（站点后加的广告位，
-    // 含 200 金币打赏按钮/累计打赏统计/求片区导流文案，整棵树删掉）
+    // 广告与无用块，命中即整块移除（含打赏推广卡）
     const REMOVE_SELECTORS = ['.recs-wrapper', '.recs-head', '.recs-row', '.recs-pill',
                               '.nav-container', '.movie-banner', '.reward-card'];
     const REMOVE_SELECTOR = REMOVE_SELECTORS.join(',');
@@ -87,7 +72,7 @@
         s.textContent = `
             /* 放弃加载的图：压暗标记，点击重新排队再试 */
             .lazy-failed{opacity:0.15!important;cursor:pointer;}
-            /* 重试角标：挂在失败图外层容器右上角，比压暗的图本身更好认 */
+            /* 重试角标：挂在失败图外层容器右上角 */
             .lazy-retry{position:absolute;top:4px;right:4px;z-index:5;display:flex;align-items:center;
                 justify-content:center;width:24px;height:24px;border-radius:50%;background:rgba(0,0,0,.65);
                 color:#fff;font-size:13px;line-height:1;cursor:pointer;}
@@ -328,7 +313,7 @@
     const imgQueue = [];
     let imgInFlight = 0;
 
-    // 图床健康度：连续硬失败判死；任一成功即清零解封；超时另用更宽的阈值也判死
+    // 图床健康度：连续硬失败判死；任一成功即清零；超时用更宽阈值
     const hostFailStreak = new Map();
     const hostTimeoutStreak = new Map();
     const hostCooldown = new Map();
@@ -340,8 +325,7 @@
         for (let i = 0; i < imgQueue.length; ) {
             if (MAX_IMG_IN_FLIGHT > 0 && imgInFlight >= MAX_IMG_IN_FLIGHT) break;
             const task = imgQueue[i];
-            // 只做准入判断；真正的计数在 task 内部（挂着陈旧代号的任务会提前返回，
-            // 若在这里先加计数就会漏还一个配额，把该域名永久卡死）
+            // 计数在 task 内部做，避免漏还配额
             if ((inFlightByHost.get(task._host) || 0) >= PER_HOST_IN_FLIGHT) { i++; continue; }
             imgQueue.splice(i, 1);
             task();
@@ -357,8 +341,7 @@
             forgetHost(origin);
             return;
         }
-        // 整体挂住不回的图床同样不可用，必须能走到熔断，
-        // 否则超时类失败永远熔断不了，每轮刷新都全量重试
+        // 超时也计入图床健康度，只是阈值更宽
         if (outcome === 'timeout') {
             const n = (hostTimeoutStreak.get(origin) || 0) + 1;
             hostTimeoutStreak.set(origin, n);
@@ -379,11 +362,9 @@
         hostTimeoutStreak.delete(origin);
         log(`图床进入冷却（第 ${rounds} 轮，${reason}）: ${origin}`);
         if (rounds > HOST_COOLDOWN_ROUNDS) {
-            // 只有硬失败（连接被拒/404 等，请求确实结束了）才认定图床已死、写入失败记忆；
-            // 超时类（整窗挂住不响应）可能只是慢——写死记忆会让后续 5 分钟整页跳过，
-            // 慢图床被持久判死。timeout 只重置冷却轮次继续给机会，等到一次成功即解封
+            // 只有硬失败才写入持久失败记忆；超时只重置冷却轮次继续给机会
             if (reason === 'hard') {
-                rememberDeadHost(origin);   // 本次页面内放弃，并让下一页也不再硬撞
+                rememberDeadHost(origin);
                 hostCooldown.delete(origin);
             } else {
                 hostCooldown.set(origin, { until: Date.now() + HOST_COOLDOWN_MS, rounds: 0 });
@@ -402,10 +383,7 @@
         return isDeadHost(origin);
     }
 
-    // 前两次尝试用原地址（命中缓存直接成功）；
-    // 只有在「上一次请求已经结束」的硬错误重试时才换地址破缓存。
-    // 超时重试绝不能换地址、也不能重赋同值：那会取消浏览器仍在排队/在途的那次请求，
-    // 把它重新排到队尾，越重试越慢。
+    // 硬错误重试才换地址破缓存；超时重试沿用原地址（重赋 src 会取消在途请求）
     function attemptUrl(url, attempt, refetch) {
         if (!refetch) return url;
         return url + (url.indexOf('?') === -1 ? '?' : '&') + '_r=' + Date.now() + attempt;
@@ -417,12 +395,10 @@
         img.src = url;
     }
 
-    // 加载一张图。manual=true 为角标/点击手动重试：不 add/settle，赦免记忆后强行发请求
-    // count=false 用于节点复用重登记（total 已记过，不重复计数）
+    // 加载一张图。manual=手动重试（不动进度分母）；count=false=节点复用不重复计数
     function loadThumb(img, url, manual = false, count = true) {
         const origin = imageOrigin(url);
-        // 生成代号：站点改写 src（节点复用）或再次手动重试时作废本闭包，
-        // 陈旧的 load/error/timer/队列任务全部短路，防止错记到新图上
+        // 代号：节点换图或手动重试时作废本闭包，旧回调全部短路
         const gen = (img._gen = (img._gen || 0) + 1);
         let startedAt = 0;    // 本次请求真正发出的时刻（在途计时起点）
         let waitUsed = 0;     // 跨重试累计的在途等待毫秒；冷却/排队/退避不计入
@@ -446,8 +422,7 @@
 
         const done = (failed, outcome) => {
             if (settled || img._gen !== gen) return;
-            // 已经解出画面（naturalWidth > 0）就按成功结算：用户看得见内容，
-            // 再压暗只会让人以为图坏了。标记失败并不会中止请求，图仍会把剩余部分下完。
+            // 已解出画面就按成功结算，不压暗
             if (failed && img.naturalWidth > 0) { failed = false; outcome = 'partial'; }
             settled = true;
             failedFlag = failed;
@@ -461,8 +436,7 @@
             else if (outcome === 'hard') { rememberBadImage(url); trackHostResult(origin, 'hard'); }
             else if (outcome === 'timeout') trackHostResult(origin, 'timeout');
             else if (outcome === 'cached-hard') rememberBadImage(url);
-            // skip 不进失败记忆：它只说明「这张没试过」（图床冷却中或已判死），
-            // 记下来会让下一页把同一批图直接判死，整页变砖
+            // skip 不进失败记忆（只是没试过，不是真失败）
 
             if (manual) {
                 if (!failed) {
@@ -481,10 +455,7 @@
             if (failed) recheckAfterFail();
         };
 
-        // 失败后的复核。数据可能刚好在结算之后才到，此时图已经能看见，
-        // 再压着只会让人以为图坏了。固定 2s/6s 两点复核会miss慢图床的数据到达
-        // （实测 12 张已解出画面仍被压暗），改为持续轮询：每 2s 查一次，
-        // 直到图解出画面、节点换代或超过 60s 上限
+        // 失败后持续复核：数据迟到到达时撤回暗态和失败计数
         function recheckAfterFail() {
             const deadline = Date.now() + 60000;
             const tick = () => {
@@ -493,7 +464,7 @@
                 if (img.naturalWidth > 0) {
                     failedFlag = false;
                     img._wasFailed = false;
-                    forgetImage(url);   // 同步赦免记忆：图已可见，不能留着失败记录让刷新后 skip
+                    forgetImage(url);   // 同步赦免失败记忆
                     thumbProgress.revive();
                     unmarkFailed(img);
                     return;
@@ -515,13 +486,13 @@
                 img._heldHost = origin;
                 inFlightByHost.set(origin, (inFlightByHost.get(origin) || 0) + 1);
                 if (!manual) {
-                    // 图床冷却中：整批往后挪，等冷却结束再试，不计失败也不占槽位
+                    // 图床冷却中：推迟重发，不计失败不占槽位
                     const wait = hostCooldownWait(origin);
                     if (wait > 0) { reQueueAfter(wait); return; }
                     if (hostGaveUp(origin)) { done(true, 'skip'); return; }
                 }
                 const nextUrl = attemptUrl(url, attempt, refetch);
-                // 只有地址真的变了才赋值：对同一 URL 重新赋值会取消浏览器在途/排队的请求
+                // 地址没变才赋值（重赋同 URL 会取消在途请求）
                 if (img.getAttribute('src') !== nextUrl) setImgSrc(img, nextUrl);
                 // 命中缓存时直接结算
                 if (img.complete) {
@@ -529,9 +500,7 @@
                     done(!ok, ok ? 'ok' : 'cached-hard');
                     return;
                 }
-                // 总等待预算只累计「请求真正发出后」的在途时间：
-                // 冷却等待、重试退避、排队等窗口位都不计时。否则这些时间会先耗尽预算，
-                // 重新派发的图被秒判超时 → 超时喂熔断计数 → 再冷却 → 更多秒判，恶性循环
+                // 在途计时起点：冷却/排队/退避不计入总预算
                 startedAt = performance.now();
                 armWait();
             };
@@ -555,8 +524,8 @@
 
         function retryLater(hard) {
             attempt++;
-            refetch = hard;   // 只有「请求已经结束」的硬错误才换地址重发
-            waitUsed += performance.now() - startedAt;   // 本次在途时长计入总预算，退避等待不计
+            refetch = hard;   // 硬错误才换地址
+            waitUsed += performance.now() - startedAt;   // 累计在途时间，退避不计
             releaseSlot();
             const delay = IMG_RETRY_BASE_MS * attempt + Math.floor(Math.random() * 400);
             timer = setTimeout(() => { if (img._gen === gen) queueAttempt(); }, delay);
@@ -566,8 +535,7 @@
             if (settled || img._gen !== gen) return;
             clearTimeout(timer);
             waitUsed += performance.now() - startedAt;
-            // 超时按失败送进 done()，是否真的算失败由 done() 依据「有没有解出画面」判定；
-            // 不重发（重赋 src 会取消在途请求并重排队尾）
+            // 超时送 done() 判定是否真失败；不重发（重赋 src 会取消在途请求）
             done(true, 'timeout');
         }
 
@@ -582,9 +550,7 @@
             if (img._gen !== gen) return;
             if (img.naturalWidth > 0) {
                 if (settled && failedFlag) {
-                    // 迟到 load：已按失败结算后请求才完成，撤回失败记账与暗态，
-                    // 并赦免失败记忆——否则图已可见但记忆里仍记着失败，
-                    // 5 分钟内刷新会被 skip 直接判死（"刚还好好的图，刷新后坏了"）
+                    // 迟到 load：撤回失败记账、暗态和记忆
                     failedFlag = false;
                     img._wasFailed = false;
                     forgetImage(url);
@@ -612,8 +578,7 @@
 
     /* ============================== 失败兜底与手动重试 ============================== */
 
-    // 失败图的 ↻ 重试角标：挂到 img 的外层容器（通常是 <a>）。
-    // 容器定位不是 relative 就补一个——只当定位基准，不带偏移，不影响布局
+    // 失败图的 ↻ 重试角标：挂到 img 外层容器右上角
     function attachRetryBadge(img) {
         if (img._retryBadge) return;
         const parent = img.parentElement;
@@ -627,7 +592,7 @@
         badge.title = '重试这张图';
         badge.addEventListener('click', (e) => {
             e.preventDefault();
-            e.stopPropagation();   // 别顺着外层 <a> 跳详情页
+            e.stopPropagation();   // 不跳详情页
             manualRetry(img, e);
         });
         parent.appendChild(badge);
@@ -652,7 +617,7 @@
         detachRetryBadge(img);
     }
 
-    // 只绑一次：点击压暗的图 = 重试（load/error 在 loadThumb 里按次绑定，靠 _gen 防串）
+    // 点击压暗的图 = 重试（只绑一次）
     function watchImg(img) {
         if (img._bound) return;
         img._bound = true;
@@ -665,20 +630,17 @@
         e.preventDefault();
         e.stopPropagation();
         unmarkFailed(img);
-        // 赦免这张图的失败记忆与该图床的熔断计数，否则重试会被记忆检查自己挡回来
+        // 赦免失败记忆和图床冷却，再重试
         forgetImage(img._url);
         forgetHost(img._host);
         hostFailStreak.delete(img._host);
-        hostCooldown.delete(img._host);   // 手动重试视为用户要求立刻重开该图床
+        hostCooldown.delete(img._host);
         loadThumb(img, img._url, true, false);
     }
 
     /* ============================== 图片登记 ============================== */
 
-    // 站内占位图特征。详情页的帖子图就是「src=./images/thumb-ing.gif + data-original=真地址」，
-    // 必须在这里就把真地址换上来：否则它会被当成同源图永久放弃接管，
-    // 最后只能靠站点自己的滚动脚本换图 —— 表现就是「滚到才出图」，
-    // 直接违背本脚本「不依赖滚动触发」的承诺。
+    // 站内占位图特征
     const PLACEHOLDER_NAME_RE = /thumb-ing|thumbing|none\.gif|spacer\.gif|loading\.gif|blank\.gif|grey\.gif/i;
     function isPlaceholderSrc(src) {
         if (!src) return true;
@@ -691,15 +653,14 @@
     function pickImage(img) {
         if (!img || img.tagName !== 'IMG' || img._picked) return;
 
-        // <picture>/<source> 或 srcset 让浏览器自选 URL：改 img.src 不生效，
-        // 强接会导致记忆/熔断记错对象、重试链路断掉——这类图整个不接管，交给浏览器
+        // <picture>/srcset 图不接管（浏览器自选 URL，改 src 无效）
         if (img.closest('picture') || img.getAttribute('srcset')) { img._picked = true; return; }
 
         const cur = img.getAttribute('src');
         let src = cur || '';
         const lazy = (img.getAttribute('data-src') || img.getAttribute('data-original') ||
                    img.getAttribute('data-lazy-src') || '').trim();
-        // src 是站内占位图时，真地址在 data-* 上，换上来（否则会被当同源图永久放弃）
+        // 占位图时取 data-* 里的真地址
         if (lazy && isPlaceholderSrc(src)) src = lazy;
 
         // https 页面里的 http 图片升级成 https
@@ -720,8 +681,7 @@
         preconnectHost(host);
         rememberHost(host);
         watchImg(img);
-        // 列表页缩略图：点开帖子走新标签，免得看完帖回来丢掉整页已加载的结果
-        // （只在列表页加，详情页正文图不动，避免把正文图链接也变成新标签）
+        // 列表页缩略图点开走新标签
         if (location.pathname.indexOf('thread.php') !== -1) {
             const a = img.closest('a');
             if (a && !a.getAttribute('target')) { a.target = '_blank'; a.rel = 'noopener'; }
@@ -730,7 +690,7 @@
         const count = !img._counted;
         if (count) img._counted = true;
 
-        // 需要自己发请求：src 是占位图或挂了原生 loading=lazy，摘掉等 loadThumb 统一发
+        // 占位图或原生 lazy：摘掉 src 由脚本统一发请求
         if (cur !== img._url || img.getAttribute('loading') === 'lazy') {
             img._selfSrc = null;
             img.removeAttribute('src');
@@ -746,7 +706,7 @@
         for (let i = 0; i < imgs.length; i++) pickImage(imgs[i]);
     }
 
-    // src 被站点改写 = 节点复用换图：旧闭包作废、槽位回收、出队、撤回上次结算，等重新登记
+    // 站点改写 src = 节点复用换图：旧闭包作废、槽位回收、等重新登记
     function resetImage(img) {
         img._gen = (img._gen || 0) + 1;
         if (img._holding) {
@@ -791,10 +751,9 @@
 
     function processAdded(node) {
         if (node.nodeType !== 1) return;
-        // 先清广告再扫图：否则广告块里的图会被登记（total++/入队）后整块删掉，
-        // 既顶大进度分母，又要等超时才结算
+        // 先清广告再扫图，避免广告里的图被登记后又整块删掉
         removeMatching(node);
-        if (!node.isConnected) return;   // 节点自身就是广告块，刚被摘掉
+        if (!node.isConnected) return;   // 节点是广告块，刚被摘掉
         sweep(node);
     }
 

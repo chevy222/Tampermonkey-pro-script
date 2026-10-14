@@ -16,11 +16,10 @@
 
   // ============================ 可调参数 ============================
 
-  // 版本号，document-start 阶段写到 <html data-sehua="..."> 上（兼作双注入哨兵）
-  // 必须与文件头 @version 保持一致，否则哨兵值与声明版本对不上，排障时会误判
+  // 版本号，写到 <html data-sehua="..."> 上，兼作双注入哨兵
   const VERSION = '3.18';
 
-  // 防双注入（Tampermonkey 装重 / 多渠道注入）：先占位，后到的实例原路退出
+  // 防双注入：先占位，后到的实例原路退出
   if (document.documentElement.getAttribute('data-sehua')) return;
   document.documentElement.setAttribute('data-sehua', VERSION);
 
@@ -62,35 +61,23 @@
 
   // 同一图床连续硬失败这么多次即判不可达；任一成功即清零
   const HOST_FAIL_THRESHOLD = 3;
-
-  // 同一图床连续「超时」这么多次同样判不可达；取值为一个并发窗口（PER_HOST_IN_FLIGHT），
-  // 使整窗同时挂住的场景在第一批即可熔断
-  // 同一图床连续「超时」这么多次判为不可用。取两个并发窗口的大小：
-  // 单个窗口的图全部超时属于「这一批恰好很慢」，不足以判定整个图床不可用
+  // 同一图床连续超时这么多次也判不可用；取两个并发窗口大小
   const HOST_TIMEOUT_THRESHOLD = 12;
 
-  // 图床熔断的冷却时长与轮次：熔断只做冷却，冷却结束自动重开、继续派发；
-  // 连续这么多轮冷却后仍拿不到一次成功，才在本次页面加载内彻底放弃
+  // 图床熔断冷却时长与轮次：冷却结束自动重开，连续多轮仍无成功才彻底放弃
   const HOST_COOLDOWN_MS = 10000;
   const HOST_COOLDOWN_ROUNDS = 3;
 
-  // ============ 失败记忆 ============
-  // 记住加载失败的图和死图床，刷新页面后直接跳过
+  // 失败记忆：记住加载失败的图和死图床，刷新后直接跳过
   const BAD_IMAGE_KEY = 'sehuaBadImages';
-  const BAD_IMAGE_TTL = 5 * 60 * 1000;     // 硬失败单图的记忆时长
+  const BAD_IMAGE_TTL = 5 * 60 * 1000;
   const BAD_IMAGE_MAX = 300;
   const HOST_KEY_PREFIX = '#host#';
 
-  // 同时在途的缩略图请求数上限（0 = 不限制）——这是全局总闸
+  // 全局在途请求数上限
   const MAX_IMG_IN_FLIGHT = 16;
 
-  // 单域名在途上限。Chrome 对同一 origin 的 HTTP/1.1 只给约 6 条连接，
-  // 全局 16 会让多余的请求滞留在浏览器 socket 队列里空等，而脚本的等待计时照跑，
-  // 于是未真正发出的请求被误判超时 → 重试 → 更堵。按域名分池才是真实可控的并发。
-  // 8：实测 tu.djhdhs.us 服务端并发容量约 8（12 路突发 fetch 前 8 个 250-450ms 完成、
-  // 后 4 个被服务端排队 5.5s），旧值 6 比服务端容量还严，白放 2 路容量；
-  // 且 P0 修复后大图耐心占窗口位（45s 纯在途预算），批次轮转是收敛瓶颈，
-  // 匹配服务端容量可把每批从 6 张提到 8 张。
+  // 单域名在途上限，避免单个图床占满浏览器连接
   const PER_HOST_IN_FLIGHT = 8;
 
   // 缩略图之间的间距
@@ -511,7 +498,7 @@
       }
     },
 
-    // 手动重试成功：把已计入的失败数撤回一次，total/settled 都不动（分母不能被顶大）
+    // 手动重试成功：失败数减回一次，不动进度分母
     revive() {
       if (this.failed > 0) this.failed--;
       this.render();
@@ -602,8 +589,7 @@
     trimStamps(badImageStamps, badImages, BAD_IMAGE_MAX, BAD_IMAGE_KEY);
   }
 
-  // 手动重试前的"赦免"：把某张图（或图床键）从表里除名并落盘，
-  // 否则重试一进门就会被 loadThumb 行内的记忆检查自己挡回来
+  // 手动重试前赦免失败记忆
   function forgetImage(url) {
     if (!badImages.delete(url)) return;
     delete badImageStamps[url];
@@ -656,39 +642,36 @@
       forgetHost(origin);
       return;
     }
-    // 整体挂住不回的图床同样不可用，必须能走到熔断，
-    // 否则超时类失败永远熔断不了，每轮刷新都全量重试
-      if (outcome === 'timeout') {
-        const n = (hostTimeoutStreak.get(origin) || 0) + 1;
-        hostTimeoutStreak.set(origin, n);
-        if (n >= HOST_TIMEOUT_THRESHOLD) openHostCooldown(origin, 'timeout');
-        return;
-      }
-      const streak = (hostFailStreak.get(origin) || 0) + 1;
-      hostFailStreak.set(origin, streak);
-      if (streak >= HOST_FAIL_THRESHOLD) openHostCooldown(origin, 'hard');
+    // 超时也计入图床健康度，只是阈值更宽
+    if (outcome === 'timeout') {
+      const n = (hostTimeoutStreak.get(origin) || 0) + 1;
+      hostTimeoutStreak.set(origin, n);
+      if (n >= HOST_TIMEOUT_THRESHOLD) openHostCooldown(origin, 'timeout');
+      return;
     }
+    const streak = (hostFailStreak.get(origin) || 0) + 1;
+    hostFailStreak.set(origin, streak);
+    if (streak >= HOST_FAIL_THRESHOLD) openHostCooldown(origin, 'hard');
+  }
 
-    // 熔断只是让该图床进入冷却，冷却结束自动重开；连续多轮都拿不到成功才彻底放弃
-    function openHostCooldown(origin, reason) {
-      const prev = hostCooldown.get(origin);
-      const rounds = (prev ? prev.rounds : 0) + 1;
-      hostCooldown.set(origin, { until: Date.now() + HOST_COOLDOWN_MS, rounds: rounds });
-      hostFailStreak.delete(origin);
-      hostTimeoutStreak.delete(origin);
-      log(`图床进入冷却（第 ${rounds} 轮，${reason}）: ${origin}`);
-      if (rounds > HOST_COOLDOWN_ROUNDS) {
-        // 只有硬失败（连接被拒/404 等，请求确实结束了）才认定图床已死、写入失败记忆；
-        // 超时类（整窗挂住不响应）可能只是慢——写死记忆会让后续 5 分钟整页跳过，
-        // 慢图床被持久判死。timeout 只重置冷却轮次继续给机会，等到一次成功即解封
-        if (reason === 'hard') {
-          rememberDeadHost(origin);   // 本次页面内放弃，并让下一页也不再硬撞
-          hostCooldown.delete(origin);
-        } else {
-          hostCooldown.set(origin, { until: Date.now() + HOST_COOLDOWN_MS, rounds: 0 });
-        }
+  // 熔断只是让该图床进入冷却，冷却结束自动重开；连续多轮都拿不到成功才彻底放弃
+  function openHostCooldown(origin, reason) {
+    const prev = hostCooldown.get(origin);
+    const rounds = (prev ? prev.rounds : 0) + 1;
+    hostCooldown.set(origin, { until: Date.now() + HOST_COOLDOWN_MS, rounds: rounds });
+    hostFailStreak.delete(origin);
+    hostTimeoutStreak.delete(origin);
+    log(`图床进入冷却（第 ${rounds} 轮，${reason}）: ${origin}`);
+    if (rounds > HOST_COOLDOWN_ROUNDS) {
+      // 只有硬失败才写入失败记忆；超时类可能只是慢，只重置冷却轮次继续给机会
+      if (reason === 'hard') {
+        rememberDeadHost(origin);
+        hostCooldown.delete(origin);
+      } else {
+        hostCooldown.set(origin, { until: Date.now() + HOST_COOLDOWN_MS, rounds: 0 });
       }
     }
+  }
 
   // 图床冷却剩余时间；> 0 表示这一轮先别发请求
   function hostCooldownWait(origin) {
@@ -705,16 +688,14 @@
     for (let i = 0; i < imgQueue.length; ) {
       if (MAX_IMG_IN_FLIGHT > 0 && imgInFlight >= MAX_IMG_IN_FLIGHT) break;
       const task = imgQueue[i];
-      // 只做准入判断；真正的计数在 task 内部（已结算的任务会提前返回，
-      // 若在这里先加计数就会漏还一个配额，把该域名永久卡死）
+      // 计数在 task 内部做，避免漏还配额
       if ((inFlightByHost.get(task._host) || 0) >= PER_HOST_IN_FLIGHT) { i++; continue; }
       imgQueue.splice(i, 1);
       task();
     }
   }
 
-  // 该帖张数决定的单张宽度
-  // 单张缩略图的宽度：单图占半宽，多图等分整行
+  // 单张缩略图宽度：单图占半宽，多图等分整行
   function thumbWidthRule(count) {
     return count <= 1 ? '50%' : `calc((100% - ${(count - 1) * THUMB_GAP_PX}px) / ${count})`;
   }
@@ -725,14 +706,11 @@
     return url + (url.indexOf('?') === -1 ? '?' : '&') + '_r=' + Date.now() + attempt;
   }
 
-  // 记录脚本自己写进去的 src。本站 img 由脚本自建自管，站点不会改写，
-  // 所以不需要 2048 那边的 _selfSrc 比对（那边要防 MutationObserver 误判节点复用）
   function setImgSrc(img, url) {
     img.src = url;
   }
 
-  // 加载一张缩略图。窗口位按次持有，重试排到队尾。
-  // manual=true 为角标手动重试专用：不 add/settle（不动进度分母），强行绕过失败记忆发请求
+  // 加载一张缩略图。manual=手动重试（不动进度分母）
   function loadThumb(img, url, anchor, wrap, manual = false) {
     const origin = imageOrigin(url);
     let startedAt = 0;    // 本次请求真正发出的时刻（在途计时起点）
@@ -756,8 +734,7 @@
 
     const done = (failed, outcome) => {
       if (settled) return;
-      // 已经解出画面（naturalWidth > 0）就按成功结算：用户看得见内容，
-      // 再压暗只会让人以为图坏了。标记失败并不会中止请求，图仍会把剩余部分下完。
+      // 已解出画面就按成功结算，不压暗
       if (failed && img.naturalWidth > 0) { failed = false; outcome = 'partial'; }
       settled = true;
       failedFlag = failed;
@@ -769,8 +746,7 @@
       else if (outcome === 'hard') { rememberBadImage(url); trackHostResult(origin, 'hard'); }
       else if (outcome === 'timeout') trackHostResult(origin, 'timeout');
       else if (outcome === 'cached-hard') rememberBadImage(url);
-      // skip 不进失败记忆：它只说明「这张没试过」（图床冷却中或已判死），
-      // 记下来会让下一页把同一批图直接判死，整页变砖
+      // skip 不进失败记忆（只是没试过，不是真失败）
 
       if (manual) {
         if (!failed) {
@@ -791,16 +767,14 @@
       if (failed) recheckAfterFail();
     };
 
-    // 失败后的复核。数据可能刚好在结算之后才到，此时图已经能看见，
-    // 再压着只会让人以为图坏了。固定 2s/6s 两点复核会miss慢图床的数据到达，
-    // 改为持续轮询：每 2s 查一次，直到图解出画面、结算状态变化或超过 60s 上限
+    // 失败后持续复核：数据迟到到达时撤回暗态和失败计数
     function recheckAfterFail() {
       const deadline = Date.now() + 60000;
       const tick = () => {
         if (!settled || !failedFlag) return;
         if (img.naturalWidth > 0) {
           failedFlag = false;
-          forgetImage(url);   // 同步赦免记忆：图已可见，不能留着失败记录让刷新后 skip
+          forgetImage(url);   // 同步赦免失败记忆
           thumbProgress.revive();
           anchor.classList.remove('sehua-failed');
           const btn = anchor.querySelector('.sehua-retry');
@@ -820,62 +794,58 @@
         imgInFlight++;
         holding = true;
         heldHost = origin;
-                inFlightByHost.set(origin, (inFlightByHost.get(origin) || 0) + 1);
-                if (!manual) {
-                    // 图床冷却中：整批往后挪，等冷却结束再试，不计失败也不占槽位
-                    const wait = hostCooldownWait(origin);
-                    if (wait > 0) { reQueueAfter(wait); return; }
-                    if (hostGaveUp(origin)) { done(true, 'skip'); return; }
-                }
-                const nextUrl = attemptUrl(url, attempt, refetch);
-                // 只有地址真的变了才赋值：对同一 URL 重新赋值会取消浏览器在途/排队的请求
-                if (img.getAttribute('src') !== nextUrl) setImgSrc(img, nextUrl);
-                // 命中缓存时直接结算
-                if (img.complete) {
-                    const ok = img.naturalWidth > 0;
-                    done(!ok, ok ? 'ok' : 'cached-hard');
-                    return;
-                }
-                // 总等待预算只累计「请求真正发出后」的在途时间：
-                // 冷却等待、重试退避、排队等窗口位都不计时。否则这些时间会先耗尽预算，
-                // 重新派发的图被秒判超时 → 超时喂熔断计数 → 再冷却 → 更多秒判，恶性循环
-                startedAt = performance.now();
-                armWait();
+        inFlightByHost.set(origin, (inFlightByHost.get(origin) || 0) + 1);
+        if (!manual) {
+          // 图床冷却中：推迟重发，不计失败不占槽位
+          const wait = hostCooldownWait(origin);
+          if (wait > 0) { reQueueAfter(wait); return; }
+          if (hostGaveUp(origin)) { done(true, 'skip'); return; }
+        }
+        const nextUrl = attemptUrl(url, attempt, refetch);
+        // 地址没变才赋值（重赋同 URL 会取消在途请求）
+        if (img.getAttribute('src') !== nextUrl) setImgSrc(img, nextUrl);
+        if (img.complete) {
+          const ok = img.naturalWidth > 0;
+          done(!ok, ok ? 'ok' : 'cached-hard');
+          return;
+        }
+        // 在途计时起点：冷却/排队/退避不计入总预算
+        startedAt = performance.now();
+        armWait();
       };
-      task._host = origin;   // pumpImgQueue 据此做域名分池
+      task._host = origin;
       imgQueue.push(task);
       pumpImgQueue();
     };
 
-        const armWait = () => {
-            clearTimeout(timer);
-            timer = setTimeout(() => { if (!settled) onTimeout(); },
-                Math.max(0, IMG_TOTAL_WAIT_MS - waitUsed));
-        };
+    const armWait = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => { if (!settled) onTimeout(); },
+        Math.max(0, IMG_TOTAL_WAIT_MS - waitUsed));
+    };
 
-    // 图床冷却期间把这次派发整体推迟，不结算也不占槽位
+    // 图床冷却期间推迟派发，不结算不占槽位
     const reQueueAfter = (wait) => {
       releaseSlot();
       timer = setTimeout(() => { if (!settled) queueAttempt(); }, wait + 50);
     };
 
-        function retryLater(hard) {
-            attempt++;
-            refetch = hard;   // 只有「请求已经结束」的硬错误才换地址重发
-            waitUsed += performance.now() - startedAt;   // 本次在途时长计入总预算，退避等待不计
-            releaseSlot();
-            const delay = IMG_RETRY_BASE_MS * attempt + Math.floor(Math.random() * 400);
-            timer = setTimeout(queueAttempt, delay);
-        }
+    function retryLater(hard) {
+      attempt++;
+      refetch = hard;   // 硬错误才换地址
+      waitUsed += performance.now() - startedAt;   // 累计在途时间，退避不计
+      releaseSlot();
+      const delay = IMG_RETRY_BASE_MS * attempt + Math.floor(Math.random() * 400);
+      timer = setTimeout(queueAttempt, delay);
+    }
 
-        function onTimeout() {
-            if (settled) return;
-            clearTimeout(timer);
-            waitUsed += performance.now() - startedAt;
-            // 超时按失败送进 done()，是否真的算失败由 done() 依据「有没有解出画面」判定；
-            // 不重发（重赋 src 会取消在途请求并重排队尾）
-            done(true, 'timeout');
-        }
+    function onTimeout() {
+      if (settled) return;
+      clearTimeout(timer);
+      waitUsed += performance.now() - startedAt;
+      // 超时送 done() 判定是否真失败；不重发（重赋 src 会取消在途请求）
+      done(true, 'timeout');
+    }
 
     function onError() {
       if (settled) return;
@@ -887,9 +857,7 @@
     img.addEventListener('load', () => {
       if (img.naturalWidth > 0) {
         if (settled && failedFlag) {
-          // 迟到 load：已按失败结算后请求才完成，撤回失败记账与暗态，
-          // 并赦免失败记忆——否则图已可见但记忆里仍记着失败，
-          // 5 分钟内刷新会被 skip 直接判死（"刚还好好的图，刷新后坏了"）
+          // 迟到 load：撤回失败记账、暗态和记忆
           failedFlag = false;
           forgetImage(url);
           thumbProgress.revive();
@@ -900,23 +868,22 @@
         }
         done(false, 'ok');
       } else {
-        onError();   // load 了但宽度为 0 = 坏图，按错误走重试链
+        onError();   // load 了但宽度为 0 = 坏图
       }
     });
     img.addEventListener('error', onError);
 
     if (!manual) thumbProgress.add(1);
-    // 命中图级失败记忆：直接跳过（manual 模式已在 manualRetry 里赦免，强行放行）
-    // 图床记忆已并入图级表，这里只需查图级表
+    // 命中失败记忆直接跳过（manual 模式已赦免，强行放行）
     if (!manual && badImages.has(url)) { done(true, 'skip'); return; }
     queueAttempt();
   }
 
-  // 失败兜底：暗色占位 + 角标重试按钮（不再删锚点——图格宽度不变，列表不跳布局）
+  // 失败兜底：暗色占位 + 角标重试按钮
   function markFailedAnchor(anchor, url, wrap) {
     anchor.classList.add('sehua-failed');
     const img = anchor.querySelector('img');
-    if (img) img.removeAttribute('src');   // 去裂图图标，留一块干净的灰
+    if (img) img.removeAttribute('src');   // 去裂图图标
     if (anchor.querySelector('.sehua-retry')) return;
     const btn = document.createElement('span');
     btn.className = 'sehua-retry';
@@ -924,7 +891,7 @@
     btn.title = '重试这张图';
     btn.addEventListener('click', (e) => {
       e.preventDefault();
-      e.stopPropagation();   // 否则会顺着 anchor 跳详情页
+      e.stopPropagation();   // 不跳详情页
       const cur = anchor.querySelector('img');
       if (!cur) return;
       manualRetry(cur, url, anchor, wrap);
@@ -932,20 +899,18 @@
     anchor.appendChild(btn);
   }
 
-  // 手动重试：先赦免失败记忆（不清就会被记忆检查自己挡回来），换一张干净 img 重发。
-  // 换节点是因为失败态 img 是 complete=true/naturalWidth=0，且旧监听还挂在上面
+  // 手动重试：赦免失败记忆后换一个干净 img 重发
   function manualRetry(img, url, anchor, wrap) {
     const origin = imageOrigin(url);
     forgetImage(url);
     forgetHost(origin);
-    hostFailStreak.delete(origin);   // 只解封不清 streak 的话，残留 ≥3 会让紧接着一次真失败又秒判死
-    hostCooldown.delete(origin);     // 手动重试视为用户要求立刻重开该图床
+    hostFailStreak.delete(origin);
+    hostCooldown.delete(origin);
     anchor.classList.remove('sehua-failed');
     const oldBtn = anchor.querySelector('.sehua-retry');
     if (oldBtn) oldBtn.remove();
 
-    // 克隆原节点而不是新建空白 img：详情页正文图带有 width/class/onclick 等
-    // 站点设置的布局属性，丢了会导致重试成功后版式变形
+    // 克隆原节点保留站点设置的布局属性
     const fresh = img.cloneNode(false);
     fresh.removeAttribute('src');
     anchor.replaceChild(fresh, img);
