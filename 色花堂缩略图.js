@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂缩略图
 // @namespace    http://98tang.com/
-// @version      3.18
+// @version      3.19
 // @description  PC列表页从移动版触屏模板取缩略图，页面打开时一次性全部加载（无懒加载、无滚动触发、无按需加载），宽屏单列布局 + 加载进度提示 + 失败自动重试；搜索页栏目过滤与详情图加载；详情页宽屏去广告、正文图纳入同一加载引擎（进度提示 + 失败压暗 + 角标重试）；搜索繁忙自动刷新；失败图压暗留位 + 角标 ↻ 手动重试；双注入防护；迟到 load 回收。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -56,8 +56,9 @@
   const IMG_RETRY_TIMES = 2;
   const IMG_RETRY_BASE_MS = 800;
 
-  // 单张图片的总等待上限，跨所有重试共享
-  const IMG_TOTAL_WAIT_MS = 45000;
+  // 单张图片的总等待上限，跨所有重试共享。与 2048 对齐取 20s：
+  // 图床并发容量很小，挂起的请求早失败早腾槽位，慢图留角标手动重试
+  const IMG_TOTAL_WAIT_MS = 20000;
 
   // 同一图床连续硬失败这么多次即判不可达；任一成功即清零
   const HOST_FAIL_THRESHOLD = 3;
