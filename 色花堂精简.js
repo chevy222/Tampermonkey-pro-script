@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         色花堂精简
 // @namespace    http://98tang.com/
-// @version      1.0
-// @description  色花堂精简版：去广告；PC 列表页注入移动版缩略图（原生懒加载，不一次性打满图床）；详情页去懒加载/去滚动补图；检索页从详情页抽取缩略图 + 栏目过滤开关。无加载引擎、无进度条、无失败记忆——只做注入，加载交给浏览器。
+// @version      1.1
+// @description  色花堂精简版：去广告；PC 列表页注入移动版缩略图（打开即全部加载）；详情页去懒加载/去滚动补图；检索页从详情页抽取缩略图 + 栏目过滤开关。无加载引擎、无进度条、无失败记忆——只做注入，加载交给浏览器。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
 // @connect      bhagq.4yl7j.com
@@ -190,8 +190,7 @@
       a.target = '_blank';
       a.rel = 'noopener';
       const img = document.createElement('img');
-      img.src = url;
-      img.loading = 'lazy';        // 原生懒加载：只加载可见区域的，避免一次性打满图床
+      img.src = url;               // 直接加载：打开页面就开始下，不用懒加载
       img.decoding = 'async';
       img.onerror = () => { img.style.visibility = 'hidden'; };   // 裂图不露馅
       a.appendChild(img);
@@ -272,8 +271,9 @@
     return touched;
   }
 
-  // 去懒加载 + 去滚动补图：立即换真地址并打标记，站点自己的滚动加载器于是跳过；
-  // 折叠楼层是滚动/交互时才插图，补个观察者兜底
+  // 去懒加载 + 去滚动补图：全量把占位符换成真地址并打标记，站点自己的
+  // 滚动加载器于是无事可做。实测 #postlist 不会动态插入图片（两页验证），
+  // 不需要 MutationObserver
   function detailPageMain() {
     if (!document.getElementById('postlist')) { log('无帖子正文，跳过'); return; }
     removeUnused();
@@ -281,18 +281,6 @@
     let fixed = 0;
     document.querySelectorAll('#postlist img[file]').forEach(img => { if (fixLazyImg(img)) fixed++; });
     log(`正文图：${fixed} 张从占位符换成真地址/打上 lazyloaded`);
-
-    const postlist = document.getElementById('postlist');
-    if (postlist.__sehuaLiteObserver) return;
-    const observer = new MutationObserver(mutations => {
-      mutations.forEach(m => m.addedNodes.forEach(node => {
-        if (node.nodeType !== 1) return;
-        if (node.matches && node.matches('img[file]')) fixLazyImg(node);
-        if (node.querySelectorAll) node.querySelectorAll('img[file]').forEach(fixLazyImg);
-      }));
-    });
-    observer.observe(postlist, { childList: true, subtree: true });
-    postlist.__sehuaLiteObserver = observer;
   }
 
   /* ============================== 检索页 ============================== */
