@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      4.0.0
+// @version      4.1
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（打开即全部加载、宽屏单列、发帖日期搬到标题下，移动版无图的帖子从详情页补图）；详情页宽屏、正文图去懒加载；检索页宽屏单列、缩略图 + 栏目过滤开关 + 搜索繁忙自动刷新重试（5 次）；右下角加载进度胶囊。图片并发交给浏览器，无加载引擎。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -236,9 +236,11 @@
 
   // ============================ 去广告 ============================
 
-  // 垃圾元素 + 表格里非帖子行（公告/空表头/广告行）
+  // 垃圾元素 + 表格里非帖子行（公告/空表头/广告行）。
+  // #autopbn 是 autoloadpage 插件的 AJAX 翻页浮动按钮：很少点、且和宽屏单列版式冲突，
+  // 随广告一并清掉；翻页用页面里的标准分页链接（.pg 内的页码/下一页，整页跳转脚本会正常处理）
   function removeUnused() {
-    document.querySelectorAll('.show-text.cl, .show-text2, .show-text4, #f_pst, .wp.mtn, .h10, #newspecial, #newspecialtmp').forEach(el => el.remove());
+    document.querySelectorAll('#autopbn, .show-text.cl, .show-text2, .show-text4, #f_pst, .wp.mtn, .h10, #newspecial, #newspecialtmp').forEach(el => el.remove());
     document.querySelectorAll('#threadlisttableid tbody:not([id^=normalthread_]):not([id^=stickthread_])').forEach(tb => { if (!tb.querySelector('.pg')) tb.remove(); });
   }
 
@@ -259,9 +261,7 @@
     if (!fid || !document.getElementById('threadlisttableid')) return;
 
     addStyle(THUMB_CSS + PILL_CSS + ' #threadlisttableid { table-layout: fixed !important; width: 100% !important; } #threadlisttableid th { width: 100% !important; padding-right: 12px; }');
-    removeUnused();
-    // 掐掉 autoloadpage.js 的 AJAX 翻页（绑在 onclick 上），走 href 整页跳转
-    const autopbn = document.getElementById('autopbn'); if (autopbn) autopbn.onclick = null;
+    removeUnused();   // 顺带清掉 #autopbn 浮动翻页按钮（见函数注释）
 
     // 移动版映射：仅被拦（null）才重试，空页不重试
     let r = null;
