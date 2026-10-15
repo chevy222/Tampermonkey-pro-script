@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048
 // @namespace    https://fby.hfz300.com/
-// @version      4.0.0
+// @version      4.0
 // @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；去懒加载——列表原生 lazy 与详情页占位图（data-original）一律立即加载，防抖观察者兜底站点改图；右下角加载进度胶囊。无加载引擎。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
