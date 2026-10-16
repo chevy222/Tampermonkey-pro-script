@@ -27,8 +27,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-t2048') === '4.0.0') return;
-  document.documentElement.setAttribute('data-t2048', '4.0.0');
+  if (document.documentElement.getAttribute('data-t2048') === '4.0') return;
+  document.documentElement.setAttribute('data-t2048', '4.0');
 
   // ============================ 样式 ============================
 

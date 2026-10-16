@@ -13,6 +13,12 @@
 (function () {
   'use strict';
 
+  // ============================ 哨兵 ============================
+
+  // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
+  if (document.documentElement.getAttribute('data-sehua') === '4.1') return;
+  document.documentElement.setAttribute('data-sehua', '4.1');
+
   // ============================ 可调参数 ============================
 
   // 移动版 User-Agent，服务端据此分发触屏模板
