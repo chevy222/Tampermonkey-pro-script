@@ -174,8 +174,8 @@
     debounceTimer = setTimeout(() => processRoot(document), OBSERVE_DEBOUNCE);
   }
 
-  // 站点滚动加载器会改写 src、后续可能插入新图：防抖后幂等重处理
-  new MutationObserver(scheduleProcess).observe(document.documentElement, { childList: true, subtree: true, attributeFilter: ['src'] });
+  // 站点 AJAX 插入新帖子行时扫描新图；src 已在初始全扫时设好，不监听属性变化
+  new MutationObserver(scheduleProcess).observe(document.documentElement, { childList: true, subtree: true });
 
   processRoot(document);
 })();
