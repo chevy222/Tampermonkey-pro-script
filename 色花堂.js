@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      5.2
+// @version      5.3
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（横竖版按原比例、竖图最高 4:3 垂直居中裁切、每行最多 5 张、右上角图片总数角标；打开即全部加载，宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片加载队列对齐移动端节奏（4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 搜索繁忙自动重试；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -16,8 +16,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '5.2') return;
-  document.documentElement.setAttribute('data-sehua', '5.2');
+  if (document.documentElement.getAttribute('data-sehua') === '5.3') return;
+  document.documentElement.setAttribute('data-sehua', '5.3');
 
   // ============================ 可调参数 ============================
 
@@ -339,8 +339,13 @@
   // #autopbn 是 autoloadpage 插件的 AJAX 翻页浮动按钮：很少点、且和宽屏单列版式冲突，
   // 随广告一并清掉；翻页用页面里的标准分页链接（.pg 内的页码/下一页，整页跳转脚本会正常处理）
   function removeUnused() {
-    document.querySelectorAll('#autopbn, .show-text.cl, .show-text2, .show-text4, #f_pst, .wp.mtn, .h10, #newspecial, #newspecialtmp').forEach(el => el.remove());
-    document.querySelectorAll('#threadlisttableid tbody:not([id^=normalthread_]):not([id^=stickthread_])').forEach(tb => { if (!tb.querySelector('.pg')) tb.remove(); });
+    // 注意：不清 .show-text2——它是列表页"查看今日新帖"入口行，删了站点功能就断了
+    document.querySelectorAll('#autopbn, .show-text.cl, .show-text4, #f_pst, .wp.mtn, .h10, #newspecial, #newspecialtmp').forEach(el => el.remove());
+    document.querySelectorAll('#threadlisttableid tbody:not([id^=normalthread_]):not([id^=stickthread_])').forEach(tb => {
+      // 保留：分页行、"今日新帖"分隔行（站点 forumchecknew 依赖 #separatorline，删了 console 报 parentNode 错误）、"查看新帖"入口行
+      if (tb.querySelector('.pg') || tb.id === 'separatorline' || tb.querySelector('.show-text2')) return;
+      tb.remove();
+    });
   }
 
   // ============================ 列表页 ============================
