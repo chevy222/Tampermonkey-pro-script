@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      4.2
+// @version      4.3
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（打开即全部加载、宽屏单列、发帖日期搬到标题下，移动版无图的帖子从详情页补图）；详情页宽屏、正文图去懒加载；检索页宽屏单列、缩略图 + 栏目过滤开关 + 搜索繁忙自动刷新重试（5 次）；右下角加载进度胶囊。图片并发交给浏览器，无加载引擎。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -16,8 +16,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '4.2') return;
-  document.documentElement.setAttribute('data-sehua', '4.2');
+  if (document.documentElement.getAttribute('data-sehua') === '4.3') return;
+  document.documentElement.setAttribute('data-sehua', '4.3');
 
   // ============================ 可调参数 ============================
 
@@ -127,11 +127,15 @@
 
   // ============================ 缩略图 ============================
 
-  // 宽度规则：1 张占半行，多张均分（扣除间距）
-  const thumbWidthRule = n => n <= 1 ? '50%' : `calc((100% - ${(n - 1) * THUMB_GAP}px) / ${n})`;
+  // 宽度规则（对齐移动端 n5_htnrtp 的 styleN 逻辑）：1-2 张均分半行，3 张及以上每行 3 张换行
+  const thumbWidthRule = n => {
+    const cols = Math.min(Math.max(n, 1), 3);
+    return n <= 1 ? '50%' : `calc((100% - ${(cols - 1) * THUMB_GAP}px) / ${cols})`;
+  };
 
   // DOM-API 构造缩略图容器——不能 innerHTML 拼 URL，图址含引号会破坏结构。
-  // total=该帖图片总数（移动版角标值），有则右上角显示角标（对齐移动端语义）
+  // total=该帖图片总数（移动版角标值），有则右上角显示角标（对齐移动端语义）。
+  // img 保留移动端的 data-original / class 结构（站点 .lazy 无隐藏样式，实测安全）
   function createThumbWrap(tid, urls, total) {
     const wrap = document.createElement('div');
     wrap.className = 'sehua-thumb';
@@ -142,6 +146,8 @@
       a.target = '_blank';
       a.rel = 'noopener';
       const img = document.createElement('img');
+      img.className = 'lazy imagelist';
+      img.setAttribute('data-original', u);
       img.src = u;
       img.decoding = 'async';
       a.appendChild(img);
