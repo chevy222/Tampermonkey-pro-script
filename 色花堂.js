@@ -353,8 +353,8 @@
     // 注意：不清 .show-text2——它是列表页"查看今日新帖"入口行，删了站点功能就断了
     document.querySelectorAll('#autopbn, .show-text.cl, .show-text4, #f_pst, .wp.mtn, .h10, #newspecial, #newspecialtmp').forEach(el => el.remove());
     document.querySelectorAll('#threadlisttableid tbody:not([id^=normalthread_]):not([id^=stickthread_])').forEach(tb => {
-      // 保留：分页行、"今日新帖"分隔行、"查看新帖"入口行
-    if (tb.querySelector('.pg') || tb.id === 'separatorline' || tb.querySelector('.show-text2')) return;
+      // 保留：分页行、"今日新帖"分隔行（站点 forumchecknew 依赖它，删了 console 报 parentNode 错）、"查看新帖"入口行
+      if (tb.querySelector('.pg') || tb.id === 'separatorline' || tb.querySelector('.show-text2')) return;
       tb.remove();
     });
     // 非帖子行里的多列行删掉，防止 table-layout:fixed 把标题列压窄
