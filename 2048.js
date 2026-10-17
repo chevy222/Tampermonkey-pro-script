@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048
 // @namespace    https://fby.hfz300.com/
-// @version      4.7
+// @version      4.8
 // @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；去懒加载——列表原生 lazy 与详情页占位图（data-original）一律立即加载，防抖观察者兜底站点改图；图片加载队列（10 张/秒、在途≤10、首屏突发 10），列表页"搜索"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
@@ -37,8 +37,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-t2048') === '4.7') return;
-  document.documentElement.setAttribute('data-t2048', '4.7');
+  if (document.documentElement.getAttribute('data-t2048') === '4.8') return;
+  document.documentElement.setAttribute('data-t2048', '4.8');
 
   // ============================ 样式 ============================
 
@@ -115,13 +115,13 @@
     const start = poolDone => {
       let released = false;
       const release = () => { if (released) return; released = true; clearTimeout(to); if (poolDone) poolDone(); };
-      const to = setTimeout(() => { timedOut = true; settle(true); pill.markUndecided(); release(); }, IMG_HOLD_TIMEOUT);
+      const to = setTimeout(() => { timedOut = true; pill.markUndecided(); release(); }, IMG_HOLD_TIMEOUT);
       img.addEventListener('load', () => {
-        if (timedOut) pill.resolveUndecided(true); else settle(false);   // 迟到成功：解除未决 + 回退失败计数
+        if (timedOut) { timedOut = 'resolved'; pill.resolveUndecided(true); } else settle(false);   // 迟到成功：补结算，不计失败
         release();
       }, { once: true });
       img.addEventListener('error', () => {
-        if (timedOut) pill.resolveUndecided(false); else settle(true);   // 迟到失败：只解除未决，失败计数保留
+        if (timedOut) { timedOut = 'resolved'; pill.resolveUndecided(false); } else settle(true);  // 迟到明确失败：补结算 + 计失败
         release();
       }, { once: true });
       action();
@@ -198,25 +198,25 @@
 
     settle(failed) { this.settled++; if (failed) this.failed++; this.render(); },
 
-    // 超时判失败后图又延迟加载成功：回退失败计数（计数与可见性解耦，只挡重渲染不挡扣减）
-    correctFailed() {
-      if (this.failed > 0) this.failed--;
-      if (this.el && this.el.isConnected) this.render();
-    },
-
-    // 超时只释放配额，图仍在等真实结果——记为"未决"，胶囊不算完成、不淡出，直到迟到落地或兜底到期
+    // 超时只释放配额，图仍在等响应——记为"未决"，不算失败（失败只认明确的 error）；胶囊不淡出直到落地或兜底
     markUndecided() {
       this.undecided++;
-      if (!this.undecidedTimer) this.undecidedTimer = setTimeout(() => { this.undecidedTimer = null; this.undecided = 0; this.render(); }, IMG_HOLD_TIMEOUT * 2);
+      if (!this.undecidedTimer) this.undecidedTimer = setTimeout(() => {
+        this.undecidedTimer = null;
+        if (!this.undecided) return;
+        this.settled += this.undecided; this.failed += this.undecided; this.undecided = 0;
+        this.render();
+      }, IMG_HOLD_TIMEOUT * 2);
       this.render();
     },
 
-    // 未决图落地：解除未决；lateOk 时同时回退失败计数
+    // 未决图迟到落地：补结算。lateOk=true 迟到成功（不计失败），false 迟到明确失败
     resolveUndecided(lateOk) {
       clearTimeout(this.undecidedTimer); this.undecidedTimer = null;
       if (this.undecided > 0) this.undecided--;
-      if (lateOk) this.correctFailed();
-      else this.render();
+      this.settled++;
+      if (!lateOk) this.failed++;
+      this.render();
     },
 
     render() {
