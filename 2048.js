@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048
 // @namespace    https://fby.hfz300.com/
-// @version      4.9
+// @version      5.0
 // @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；去懒加载——列表原生 lazy 与详情页占位图（data-original）一律立即加载，防抖观察者兜底站点改图；图片加载队列（10 张/秒、在途≤10、首屏突发 10），列表页"搜索"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
@@ -37,8 +37,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-t2048') === '4.9') return;
-  document.documentElement.setAttribute('data-t2048', '4.9');
+  if (document.documentElement.getAttribute('data-t2048') === '5.0') return;
+  document.documentElement.setAttribute('data-t2048', '5.0');
 
   // ============================ 样式 ============================
 
@@ -226,7 +226,11 @@
       el.classList.toggle('thumb-progress-done', done && !this.failed);
       el.classList.toggle('thumb-progress-partial', done && this.failed > 0);
       // 四段固定文案：成功/等待/失败语义不变，中间态与终态不再切换分子含义
-      el.textContent = `缩略图：成功 ${this.settled - this.failed} · 等待 ${this.undecided} · 失败 ${this.failed} · 共 ${this.total}`;
+      const parts = [`成功 ${this.settled - this.failed}`];
+      if (this.undecided) parts.push(`等待 ${this.undecided}`);
+      if (this.failed) parts.push(`失败 ${this.failed}`);
+      parts.push(`共 ${this.total}`);
+      el.textContent = `缩略图：${parts.join(' · ')}`;
       if (done && !this.timer) this.timer = setTimeout(() => { this.timer = null; this.hide(); }, PILL_HIDE_DELAY);
     },
 

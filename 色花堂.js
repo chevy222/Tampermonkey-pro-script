@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      5.11
+// @version      5.12
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（横竖版按原比例、竖图最高 4:3 垂直居中裁切、每行最多 5 张、右上角图片总数角标；打开即全部加载，宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片加载队列对齐移动端节奏（4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 搜索繁忙自动重试；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -16,8 +16,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '5.11') return;
-  document.documentElement.setAttribute('data-sehua', '5.11');
+  if (document.documentElement.getAttribute('data-sehua') === '5.12') return;
+  document.documentElement.setAttribute('data-sehua', '5.12');
 
   // ============================ 可调参数 ============================
 
@@ -345,7 +345,11 @@
       const done = this.settled >= this.total && this.undecided === 0;
       el.classList.toggle('sehua-done', done && !this.failed);
       el.classList.toggle('sehua-partial', done && this.failed > 0);
-      el.textContent = `缩略图：成功 ${this.settled - this.failed} · 等待 ${this.undecided} · 失败 ${this.failed} · 共 ${this.total}`;
+      const parts = [`成功 ${this.settled - this.failed}`];
+      if (this.undecided) parts.push(`等待 ${this.undecided}`);
+      if (this.failed) parts.push(`失败 ${this.failed}`);
+      parts.push(`共 ${this.total}`);
+      el.textContent = `缩略图：${parts.join(' · ')}`;
       if (done && !this.timer) this.timer = setTimeout(() => { this.timer = null; this.hide(); }, PILL_HIDE_DELAY);
     },
 
