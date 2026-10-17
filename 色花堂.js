@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      4.6
+// @version      4.7
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（横竖版按原比例、竖图最高 4:3 垂直居中裁切、每行最多 5 张、右上角图片总数角标；打开即全部加载，宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片加载队列对齐移动端节奏（4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 搜索繁忙自动重试；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -16,8 +16,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '4.6') return;
-  document.documentElement.setAttribute('data-sehua', '4.6');
+  if (document.documentElement.getAttribute('data-sehua') === '4.7') return;
+  document.documentElement.setAttribute('data-sehua', '4.7');
 
   // ============================ 可调参数 ============================
 
@@ -195,15 +195,20 @@
     pill.add(1);
     let settledHere = false;
     const settle = failed => { if (!settledHere) { settledHere = true; pill.settle(failed); } };
+    // 按图片真实方向选框：横图/方图 → 4:3 横框（cover 横向居中裁切），竖图 → 3:4 竖框（裁上下）
+    const markOrientation = () => {
+      const a = img.closest('a');
+      if (a && img.naturalWidth && img.naturalWidth >= img.naturalHeight) a.classList.add('sehua-land');
+    };
     const start = poolDone => {
       let released = false;
       const release = () => { if (released) return; released = true; clearTimeout(to); if (poolDone) poolDone(); };
       const to = setTimeout(() => { settle(true); release(); }, IMG_HOLD_TIMEOUT);
-      img.addEventListener('load', () => { settle(false); release(); }, { once: true });
+      img.addEventListener('load', () => { markOrientation(); settle(false); release(); }, { once: true });
       img.addEventListener('error', () => { settle(true); release(); }, { once: true });
       img.setAttribute('src', url);
       // 设 src 后若图已完成（缓存命中），load 事件不会再触发，需同步结算
-      if (img.complete) { if (img.naturalWidth > 0) settle(false); else settle(true); release(); }
+      if (img.complete) { if (img.naturalWidth > 0) { markOrientation(); settle(false); } else settle(true); release(); }
     };
     if (queueEnabled) imgLoader.load(start); else start(null);
   }
@@ -260,6 +265,8 @@
     .sehua-thumb { --img-width: 50%; position: relative; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: ${THUMB_GAP}px; margin-top: 8px; }
     .sehua-thumb > a { display: flex; align-items: center; justify-content: center; overflow: hidden; width: var(--img-width) !important; aspect-ratio: 3 / 4; border-radius: 4px; border: 1px solid #ddd; background: #f5f5f5; box-sizing: border-box; text-decoration: none; }
     .sehua-thumb img { width: 100% !important; height: auto !important; display: block; }
+    .sehua-thumb > a.sehua-land { aspect-ratio: 4 / 3; }
+    .sehua-thumb > a.sehua-land img { height: 100% !important; object-fit: cover; object-position: center; }
     .sehua-num { position: absolute; right: 8px; top: 8px; z-index: 1; padding: 0 6px; height: 18px; line-height: 18px; font-size: 11px; color: #fff; background: rgba(0, 0, 0, 0.55); border-radius: 3px; pointer-events: none; }
     .sehua-date { display: inline-block; margin: 4px 0 0 8px; font-size: 12px; color: #999; }
   `;
