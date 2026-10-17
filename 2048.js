@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048
 // @namespace    https://fby.hfz300.com/
-// @version      4.3
+// @version      4.4
 // @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；去懒加载——列表原生 lazy 与详情页占位图（data-original）一律立即加载，防抖观察者兜底站点改图；图片加载队列（10 张/秒、在途≤10、首屏突发 10），列表页"搜索"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
@@ -37,8 +37,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-t2048') === '4.3') return;
-  document.documentElement.setAttribute('data-t2048', '4.3');
+  if (document.documentElement.getAttribute('data-t2048') === '4.4') return;
+  document.documentElement.setAttribute('data-t2048', '4.4');
 
   // ============================ 样式 ============================
 
@@ -201,7 +201,8 @@
       el.classList.toggle('thumb-progress-partial', done && this.failed > 0);
       el.textContent = done
         ? (this.failed ? `缩略图 ${this.total - this.failed}/${this.total}（${this.failed} 张失败）` : `缩略图 ${this.total} 张已加载`)
-        : `缩略图已完成 ${this.settled}/${this.total}${this.failed ? `（其中 ${this.failed} 张失败）` : ''}`;
+        // 分子统一用"成功数"（settled - failed），与终态语义一致
+        : `缩略图已成功 ${this.settled - this.failed}/${this.total}${this.failed ? `（${this.failed} 张失败）` : ''}`;
       if (done && !this.timer) this.timer = setTimeout(() => { this.timer = null; this.hide(); }, PILL_HIDE_DELAY);
     },
 
