@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         2048
 // @namespace    https://fby.hfz300.com/
-// @version      4.0
-// @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；去懒加载——列表原生 lazy 与详情页占位图（data-original）一律立即加载，防抖观察者兜底站点改图；右下角加载进度胶囊。无加载引擎。
+// @version      4.1
+// @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；去懒加载——列表原生 lazy 与详情页占位图（data-original）一律立即加载，防抖观察者兜底站点改图；图片加载队列（4 张/秒、在途≤6、首屏突发 6），列表页"搜索"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
 // @run-at       document-idle
@@ -24,11 +24,20 @@
   // 进度胶囊全部结算后延迟多久淡出
   const PILL_HIDE_DELAY = 2500;
 
+  // 图片加载节奏（同色花堂：对齐移动版实测——最大在途 6 路、约 3-6 张/秒）
+  const IMG_INFLIGHT_MAX = 6;
+  const IMG_START_PER_SEC = 4;
+  const IMG_TOKEN_CAP = 6;
+  const IMG_HOLD_TIMEOUT = 15000;
+
+  // 队列模式开关状态的 localStorage 键名（'0'=关闭，恢复旧的一次性全量加载）
+  const QUEUE_KEY = 't2048QueueMode';
+
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-t2048') === '4.0') return;
-  document.documentElement.setAttribute('data-t2048', '4.0');
+  if (document.documentElement.getAttribute('data-t2048') === '4.1') return;
+  document.documentElement.setAttribute('data-t2048', '4.1');
 
   // ============================ 样式 ============================
 
@@ -46,6 +55,74 @@
   function removeMatching(root) {
     if (!root || !root.querySelectorAll) return;
     root.querySelectorAll(REMOVE_SELECTORS.join(',')).forEach(el => el.remove());
+  }
+
+  // ============================ 图片加载队列 ============================
+  // 同色花堂：令牌桶控节奏（4 张/秒、在途≤6、首屏突发 6、单张 15s 兜底）
+  // 队列模式开关关闭时每张图立即加载（旧行为）
+
+  const imgLoader = (() => {
+    let tokens = IMG_TOKEN_CAP, inflight = 0, queue = [], timer = null;
+    const pump = () => {
+      while (queue.length && tokens > 0 && inflight < IMG_INFLIGHT_MAX) {
+        tokens--; inflight++;
+        queue.shift()(() => { inflight--; pump(); });
+      }
+      if (queue.length && !timer) timer = setInterval(() => { tokens = Math.min(IMG_TOKEN_CAP, tokens + 1); pump(); }, 1000 / IMG_START_PER_SEC);
+      if (!queue.length && timer) { clearInterval(timer); timer = null; }
+    };
+    const load = task => { queue.push(task); pump(); };
+    const flushAll = () => {
+      if (timer) { clearInterval(timer); timer = null; }
+      queue.splice(0).forEach(task => task(() => {}));
+    };
+    return { load, flushAll };
+  })();
+
+  let queueEnabled = true;
+
+  function setQueueMode(on) {
+    queueEnabled = on;
+    if (!on) imgLoader.flushAll();
+  }
+
+  // 队列模式开关：插在列表页顶部"搜索"导航项右边。
+  // queueEnabled 初始化在启动处无条件做，不能依赖本函数
+  function injectQueueSwitch() {
+    if (document.getElementById('t2048-queue-switch')) return;
+    const link = [...document.querySelectorAll('a')].find(a => (a.textContent || '').trim() === '搜索' && a.getBoundingClientRect().width > 0);
+    const li = link && link.closest('li');
+    if (!li) return;
+    let on = true;
+    try { on = localStorage.getItem(QUEUE_KEY) !== '0'; } catch (e) {}
+    const box = document.createElement('li');
+    box.id = 't2048-queue-switch';
+    box.innerHTML = '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;user-select:none;font-size:13px;padding:0 10px;white-space:nowrap;"><input type="checkbox"' + (on ? ' checked' : '') + '>队列模式</label>';
+    li.insertAdjacentElement('afterend', box);
+    box.querySelector('input').addEventListener('change', e => {
+      try { localStorage.setItem(QUEUE_KEY, e.target.checked ? '1' : '0'); } catch (err) {}
+      setQueueMode(e.target.checked);
+    });
+  }
+
+  // 让一张图计入胶囊并按队列模式开始加载；action=实际触发加载的动作（设 src / 改 loading）
+  function trackImage(img, action) {
+    if (img.dataset.watched) return;   // 同一节点只计一次
+    img.dataset.watched = '1';
+    pill.add(1);
+    let settledHere = false;
+    const settle = failed => { if (!settledHere) { settledHere = true; pill.settle(failed); } };
+    const start = poolDone => {
+      let released = false;
+      const release = () => { if (released) return; released = true; clearTimeout(to); if (poolDone) poolDone(); };
+      const to = setTimeout(() => { settle(true); release(); }, IMG_HOLD_TIMEOUT);
+      img.addEventListener('load', () => { settle(false); release(); }, { once: true });
+      img.addEventListener('error', () => { settle(true); release(); }, { once: true });
+      action();
+      // 触发后若图已完成（缓存命中/原本就加载完了），load 事件不会再触发，需同步结算
+      if (img.complete) { if (img.naturalWidth > 0) settle(false); else settle(true); release(); }
+    };
+    if (queueEnabled) imgLoader.load(start); else start(null);
   }
 
   // ============================ 去懒加载 ============================
@@ -72,17 +149,17 @@
     } catch (e) { return null; }
   };
 
-  // 处理单张图：占位图换 data 属性里的真址，原生懒图改立即加载；返回是否动了这张图
+  // 处理单张图：占位图换 data 属性里的真址，原生懒图改立即加载；返回是否动了这张图。
+  // 触发加载的动作交给 trackImage（计入胶囊 + 按队列模式节流）
   function deLazyImg(img) {
     if (img.closest('picture') || img.getAttribute('srcset')) return false;   // 响应式图不碰
     const real = absUrl(img.getAttribute('data-original') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src'));
     let touched = false;
     if (real && isPlaceholderSrc(img.getAttribute('src'))) {
-      img.loading = 'eager';                  // eager 先于 src：赋值的瞬间就必须是立即加载
-      img.src = real;
+      trackImage(img, () => { img.loading = 'eager'; img.src = real; });
       touched = true;
     } else if (img.getAttribute('loading') === 'lazy') {
-      img.loading = 'eager';                  // 原生懒图（src 已真）直接改立即加载
+      trackImage(img, () => { img.loading = 'eager'; });   // 原生懒图（src 已真）改立即加载
       touched = true;
     }
     if (touched) {
@@ -95,13 +172,9 @@
     return touched;
   }
 
-  // 批量处理容器内所有图，返回本轮触发加载的图
+  // 批量处理容器内所有图
   function sweep(root) {
-    const touched = [];
-    root.querySelectorAll('img[data-original], img[data-src], img[data-lazy-src], img[loading=lazy]').forEach(img => {
-      if (deLazyImg(img)) touched.push(img);
-    });
-    return touched;
+    root.querySelectorAll('img[data-original], img[data-src], img[data-lazy-src], img[loading=lazy]').forEach(deLazyImg);
   }
 
   // ============================ 加载进度胶囊 ============================
@@ -146,26 +219,10 @@
     }
   };
 
-  // 监听一组图的加载结果；调用时机 = 赋真址/插入 DOM 之后
-  function watchImgs(imgs) {
-    imgs.forEach(img => {
-      if (img.dataset.watched) return;               // 同一节点只计一次
-      img.dataset.watched = '1';
-      pill.add(1);
-      const done = failed => pill.settle(failed);
-      if (img.complete) done(img.naturalWidth === 0);            // 缓存命中：同步结算
-      else {
-        img.addEventListener('load', () => done(false), { once: true });
-        img.addEventListener('error', () => done(true), { once: true });
-      }
-    });
-  }
-
   // ============================ 启动 ============================
-
   function processRoot(root) {
     removeMatching(root);                              // 先清广告再扫图：广告块里的图不处理
-    watchImgs(sweep(root));
+    sweep(root);                                       // 计数与节流由 trackImage 接管
   }
 
   let debounceTimer = null;
@@ -177,5 +234,8 @@
   // 站点 AJAX 插入新帖子行时扫描新图；src 已在初始全扫时设好，不监听属性变化
   new MutationObserver(scheduleProcess).observe(document.documentElement, { childList: true, subtree: true });
 
+  // 队列模式初始化（无条件，不能依赖开关是否渲染出来）+ 注入开关
+  try { queueEnabled = localStorage.getItem(QUEUE_KEY) !== '0'; } catch (e) {}
+  injectQueueSwitch();
   processRoot(document);
 })();

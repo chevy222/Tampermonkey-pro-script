@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      4.5
-// @description  色花堂：去广告；PC 列表页注入移动版缩略图（打开即全部加载、宽屏单列、发帖日期搬到标题下，移动版无图的帖子从详情页补图）；详情页宽屏、正文图去懒加载；检索页宽屏单列、缩略图 + 栏目过滤开关 + 搜索繁忙自动刷新重试（5 次）；右下角加载进度胶囊。图片并发交给浏览器，无加载引擎。
+// @version      4.6
+// @description  色花堂：去广告；PC 列表页注入移动版缩略图（横竖版按原比例、竖图最高 4:3 垂直居中裁切、每行最多 5 张、右上角图片总数角标；打开即全部加载，宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片加载队列对齐移动端节奏（4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 搜索繁忙自动重试；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
 // @connect      bhagq.4yl7j.com
@@ -16,8 +16,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '4.5') return;
-  document.documentElement.setAttribute('data-sehua', '4.5');
+  if (document.documentElement.getAttribute('data-sehua') === '4.6') return;
+  document.documentElement.setAttribute('data-sehua', '4.6');
 
   // ============================ 可调参数 ============================
 
@@ -67,6 +67,9 @@
 
   // 单张图最多占用配额多久再兜底释放（旧图床 wkt41.app 会黑洞挂起，不释放会卡死池）
   const IMG_HOLD_TIMEOUT = 15000;
+
+  // 队列模式开关状态的 localStorage 键名（'0'=关闭，恢复旧的一次性全量加载）
+  const QUEUE_KEY = 'sehuaQueueMode';
 
   // ============================ 工具函数 ============================
 
@@ -149,31 +152,67 @@
       if (queue.length && !timer) timer = setInterval(() => { tokens = Math.min(IMG_TOKEN_CAP, tokens + 1); pump(); }, 1000 / IMG_START_PER_SEC);
       if (!queue.length && timer) { clearInterval(timer); timer = null; }
     };
-    return task => { queue.push(task); pump(); };
+    const load = task => { queue.push(task); pump(); };
+    // 关闭队列时把剩余任务立即放行（不占池配额，等价旧的一次性全量加载）
+    const flushAll = () => {
+      if (timer) { clearInterval(timer); timer = null; }
+      queue.splice(0).forEach(task => task(() => {}));
+    };
+    return { load, flushAll };
   })();
 
-  // 让一张图进入加载池并计入胶囊：建节点时就计数（分母一次定型，不随池调度逐张涨），
-  // src 由池按移动端节奏设置；load/error/超时各结算一次（超时兜底，防黑洞图卡住分母）
+  // 列队模式：开=走加载池（对齐移动端节奏）；关=每张图立即发请求（旧行为）
+  let queueEnabled = true;
+
+  function setQueueMode(on) {
+    queueEnabled = on;
+    if (!on) imgLoader.flushAll();
+  }
+
+  // 列队模式开关：插在"新帖瀑布流"导航项（#mn_portal）右边。
+  // queueEnabled 的初始化在 onDomReady 里无条件做——不能依赖本函数，否则没有导航项的页面上开关状态会失效
+  function injectQueueSwitch() {
+    const li = document.getElementById('mn_portal');
+    if (!li || document.getElementById('sehua-queue-switch')) return;
+    let on = true;
+    try { on = localStorage.getItem(QUEUE_KEY) !== '0'; } catch (e) {}
+    const box = document.createElement('li');
+    box.id = 'sehua-queue-switch';
+    box.innerHTML = '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;user-select:none;font-size:13px;padding:0 10px;white-space:nowrap;"><input type="checkbox"' + (on ? ' checked' : '') + '>队列模式</label>';
+    li.insertAdjacentElement('afterend', box);
+    box.querySelector('input').addEventListener('change', e => {
+      try { localStorage.setItem(QUEUE_KEY, e.target.checked ? '1' : '0'); } catch (err) {}
+      setQueueMode(e.target.checked);
+    });
+  }
+
+  // 让一张图计入胶囊并开始加载：建节点时立即计数（分母一次定型），
+  // 队列模式走加载池（对齐移动端节奏），关闭队列则立即发请求（旧行为）；
+  // load/error/超时各结算一次（超时兜底，防黑洞图卡住分母）
   function trackImage(img, url) {
     if (img.dataset.watched) return;   // 同一节点只计一次
     img.dataset.watched = '1';
     pill.add(1);
-    imgLoader(done => {
-      let released = false, settledHere = false;
-      const settle = failed => { if (!settledHere) { settledHere = true; pill.settle(failed); } };
-      const fin = () => { if (released) return; released = true; clearTimeout(to); done(); };
-      const to = setTimeout(() => { fin(); settle(true); }, IMG_HOLD_TIMEOUT);
-      img.addEventListener('load', () => { settle(false); fin(); }, { once: true });
-      img.addEventListener('error', () => { settle(true); fin(); }, { once: true });
+    let settledHere = false;
+    const settle = failed => { if (!settledHere) { settledHere = true; pill.settle(failed); } };
+    const start = poolDone => {
+      let released = false;
+      const release = () => { if (released) return; released = true; clearTimeout(to); if (poolDone) poolDone(); };
+      const to = setTimeout(() => { settle(true); release(); }, IMG_HOLD_TIMEOUT);
+      img.addEventListener('load', () => { settle(false); release(); }, { once: true });
+      img.addEventListener('error', () => { settle(true); release(); }, { once: true });
       img.setAttribute('src', url);
-    });
+      // 设 src 后若图已完成（缓存命中），load 事件不会再触发，需同步结算
+      if (img.complete) { if (img.naturalWidth > 0) settle(false); else settle(true); release(); }
+    };
+    if (queueEnabled) imgLoader.load(start); else start(null);
   }
 
   // ============================ 缩略图 ============================
 
-  // 宽度规则（对齐移动端 n5_htnrtp 的 styleN 逻辑）：1-2 张均分半行，3 张及以上每行 3 张换行
+  // 宽度规则：1-2 张均分半行，3 张及以上每行最多 5 张换行
   const thumbWidthRule = n => {
-    const cols = Math.min(Math.max(n, 1), 3);
+    const cols = Math.min(Math.max(n, 1), 5);
     return n <= 1 ? '50%' : `calc((100% - ${(cols - 1) * THUMB_GAP}px) / ${cols})`;
   };
 
@@ -218,9 +257,9 @@
 
   // 缩略图版式（含宽屏底）
   const THUMB_CSS = WIDE_CSS + `
-    .sehua-thumb { --img-width: 50%; position: relative; display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start; gap: ${THUMB_GAP}px; margin-top: 8px; }
-    .sehua-thumb img { height: auto !important; border-radius: 4px; border: 1px solid #ddd; background: #f5f5f5; box-sizing: border-box !important; width: 100% !important; display: block; }
-    .sehua-thumb > a { display: block; text-decoration: none; width: var(--img-width) !important; }
+    .sehua-thumb { --img-width: 50%; position: relative; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: ${THUMB_GAP}px; margin-top: 8px; }
+    .sehua-thumb > a { display: flex; align-items: center; justify-content: center; overflow: hidden; width: var(--img-width) !important; aspect-ratio: 3 / 4; border-radius: 4px; border: 1px solid #ddd; background: #f5f5f5; box-sizing: border-box; text-decoration: none; }
+    .sehua-thumb img { width: 100% !important; height: auto !important; display: block; }
     .sehua-num { position: absolute; right: 8px; top: 8px; z-index: 1; padding: 0 6px; height: 18px; line-height: 18px; font-size: 11px; color: #fff; background: rgba(0, 0, 0, 0.55); border-radius: 3px; pointer-events: none; }
     .sehua-date { display: inline-block; margin: 4px 0 0 8px; font-size: 12px; color: #999; }
   `;
@@ -451,6 +490,9 @@
   // ============================ 路由 ============================
 
   function onDomReady() {
+    // 队列模式初始化无条件做：没有"新帖瀑布流"导航项的页面也要同步 localStorage 状态
+    try { queueEnabled = localStorage.getItem(QUEUE_KEY) !== '0'; } catch (e) {}
+    injectQueueSwitch();   // 有"新帖瀑布流"导航项的页面才可见
     if (searchBusyRetry()) return;   // 任何页面都先过一遍：非搜索页清零计数，繁忙页进入倒计时
     if (location.pathname.includes('/search.php')) searchPageMain();
     else if (location.pathname.includes('/thread-') || location.search.includes('mod=viewthread')) detailPageMain();
