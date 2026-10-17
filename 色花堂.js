@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      4.3
+// @version      4.4
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（打开即全部加载、宽屏单列、发帖日期搬到标题下，移动版无图的帖子从详情页补图）；详情页宽屏、正文图去懒加载；检索页宽屏单列、缩略图 + 栏目过滤开关 + 搜索繁忙自动刷新重试（5 次）；右下角加载进度胶囊。图片并发交给浏览器，无加载引擎。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -16,8 +16,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '4.3') return;
-  document.documentElement.setAttribute('data-sehua', '4.3');
+  if (document.documentElement.getAttribute('data-sehua') === '4.4') return;
+  document.documentElement.setAttribute('data-sehua', '4.4');
 
   // ============================ 可调参数 ============================
 
@@ -58,6 +58,15 @@
 
   // 搜索繁忙重试计数的 sessionStorage 键名
   const BUSY_KEY = 'sehuaBusyRetry';
+
+  // 图片加载节奏（对齐移动版实测：最大在途 6 路，滚动浏览约 3-6 张/秒）。
+  // 与固定批间隔不同：令牌桶滚动发放、完成即抢下一张，不人为等整批
+  const IMG_INFLIGHT_MAX = 6;
+  const IMG_START_PER_SEC = 4;
+  const IMG_TOKEN_CAP = 6;
+
+  // 单张图最多占用配额多久再兜底释放（旧图床 wkt41.app 会黑洞挂起，不释放会卡死池）
+  const IMG_HOLD_TIMEOUT = 15000;
 
   // ============================ 工具函数 ============================
 
@@ -125,6 +134,37 @@
     return null;
   })();
 
+  // ============================ 图片加载池 ============================
+  // 对齐移动版图片加载节奏：同时在途 ≤6（其视口并发实测值）、每秒最多发起 4 张
+  // （其滚动浏览实测节奏），首屏允许 6 张突发。完成/失败/超时立即释放配额抢下一张——
+  // 与已否决的"固定批间隔"不同，不会因为等整批而人为拖慢
+
+  const imgLoader = (() => {
+    let tokens = IMG_TOKEN_CAP, inflight = 0, queue = [], timer = null;
+    const pump = () => {
+      while (queue.length && tokens > 0 && inflight < IMG_INFLIGHT_MAX) {
+        tokens--; inflight++;
+        queue.shift()(() => { inflight--; pump(); });
+      }
+      if (queue.length && !timer) timer = setInterval(() => { tokens = Math.min(IMG_TOKEN_CAP, tokens + 1); pump(); }, 1000 / IMG_START_PER_SEC);
+      if (!queue.length && timer) { clearInterval(timer); timer = null; }
+    };
+    return task => { queue.push(task); pump(); };
+  })();
+
+  // 让一张图进入加载池：设 src（触发请求）→ 挂胶囊监听 → 释放配额
+  function loadImage(img, url) {
+    imgLoader(done => {
+      let released = false;
+      const fin = () => { if (released) return; released = true; clearTimeout(to); done(); };
+      img.addEventListener('load', fin, { once: true });
+      img.addEventListener('error', fin, { once: true });
+      const to = setTimeout(fin, IMG_HOLD_TIMEOUT);
+      img.setAttribute('src', url);
+      watchImgs([img]);   // src 已设再挂：无 src 的 img.complete 为 true，会误结算
+    });
+  }
+
   // ============================ 缩略图 ============================
 
   // 宽度规则（对齐移动端 n5_htnrtp 的 styleN 逻辑）：1-2 张均分半行，3 张及以上每行 3 张换行
@@ -148,10 +188,10 @@
       const img = document.createElement('img');
       img.className = 'lazy imagelist';
       img.setAttribute('data-original', u);
-      img.src = u;
       img.decoding = 'async';
       a.appendChild(img);
       wrap.appendChild(a);
+      loadImage(img, u);   // src 由加载池按移动端节奏设置
     });
     if (total > urls.length) {
       wrap.appendChild(Object.assign(document.createElement('span'), { className: 'sehua-num', textContent: total }));
@@ -287,16 +327,14 @@
     for (let i = 0; i < MOBILE_RETRY_TIMES && !r; i++) { if (i) await sleep(MOBILE_RETRY_DELAY); r = await fetchMobileThumbs(fid, m ? +m[2] : (+p.get('page') || 1)); }
     const map = r ? r.map : {}, fallback = r ? r.fallback : [], totals = r ? (r.totals || {}) : {};
 
-    const wraps = [];
     document.querySelectorAll('#threadlisttableid tr').forEach(tr => {
       const tbody = tr.closest('tbody[id^=normalthread_], tbody[id^=stickthread_]'), th = tr.querySelector('th');
       if (!tbody || !th) return;
       relocateDate(tr, th);
       tr.querySelectorAll('td').forEach(td => td.remove());   // 单列化：删掉作者/回复等列
       const tid = (tbody.id.match(/\d+/) || [])[0];
-      if (map[tid] && !th.querySelector('.sehua-thumb')) { const w = createThumbWrap(tid, map[tid], totals[tid]); th.appendChild(w); wraps.push(w); }
+      if (map[tid] && !th.querySelector('.sehua-thumb')) th.appendChild(createThumbWrap(tid, map[tid], totals[tid]));
     });
-    watchImgs(wraps.flatMap(w => [...w.querySelectorAll('img')]));
 
     // 回捞：移动版有卡无图的帖子，从详情页补图（与检索页共用取图池）
     if (fallback.length) await loadFallbackThumbs(fallback);
@@ -309,13 +347,11 @@
     if (!document.getElementById('postlist')) return;
     addStyle(WIDE_CSS + PILL_CSS + ' #postlist { width: 100% !important; } #postlist ignore_js_op { text-align: center; } #postlist ignore_js_op img.zoom { display: block; margin-left: auto; margin-right: auto; } #postlist div[style*="loading.gif"] { margin: 0 auto; }');
     removeUnused();
-    const changed = [];
     document.querySelectorAll('#postlist img[file]').forEach(img => {
       const file = img.getAttribute('file'), cur = img.getAttribute('src');
-      if (file && (!cur || isPlaceholder(cur))) { img.setAttribute('src', file); changed.push(img); }
+      if (file && (!cur || isPlaceholder(cur))) loadImage(img, file);   // 换址走加载池
       img.setAttribute('lazyloaded', 'true');
     });
-    watchImgs(changed);
   }
 
   // ============================ 检索页 ============================
@@ -354,9 +390,7 @@
           if (urls === null) continue;                  // 被拦：不标记，下次刷新再试
           task.target.dataset.sehuaChecked = '1';
           if (urls.length && !task.target.querySelector('.sehua-thumb')) {
-            const wrap = createThumbWrap(task.tid, urls);
-            task.target.appendChild(wrap);
-            watchImgs([...wrap.querySelectorAll('img')]);
+            task.target.appendChild(createThumbWrap(task.tid, urls));
           }
         } finally { tip.remove(); }
       }
