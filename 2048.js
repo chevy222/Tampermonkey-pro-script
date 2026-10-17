@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         2048
 // @namespace    https://fby.hfz300.com/
-// @version      4.1
-// @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；去懒加载——列表原生 lazy 与详情页占位图（data-original）一律立即加载，防抖观察者兜底站点改图；图片加载队列（4 张/秒、在途≤6、首屏突发 6），列表页"搜索"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；右下角加载进度胶囊。
+// @version      4.2
+// @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；去懒加载——列表原生 lazy 与详情页占位图（data-original）一律立即加载，防抖观察者兜底站点改图；图片加载队列（10 张/秒、在途≤10、首屏突发 10），列表页"搜索"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
 // @run-at       document-idle
@@ -24,10 +24,11 @@
   // 进度胶囊全部结算后延迟多久淡出
   const PILL_HIDE_DELAY = 2500;
 
-  // 图片加载节奏（同色花堂：对齐移动版实测——最大在途 6 路、约 3-6 张/秒）
-  const IMG_INFLIGHT_MAX = 6;
-  const IMG_START_PER_SEC = 4;
-  const IMG_TOKEN_CAP = 6;
+  // 图片加载节奏：2048 图床无实测限流，取"温和节流"而非色花堂的保守值——
+  // 每秒最多发起 10 张、同时在途 ≤10、首屏允许 10 张突发（52 张约 5 秒派完）
+  const IMG_INFLIGHT_MAX = 10;
+  const IMG_START_PER_SEC = 10;
+  const IMG_TOKEN_CAP = 10;
   const IMG_HOLD_TIMEOUT = 15000;
 
   // 队列模式开关状态的 localStorage 键名（'0'=关闭，恢复旧的一次性全量加载）
@@ -36,8 +37,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-t2048') === '4.1') return;
-  document.documentElement.setAttribute('data-t2048', '4.1');
+  if (document.documentElement.getAttribute('data-t2048') === '4.2') return;
+  document.documentElement.setAttribute('data-t2048', '4.2');
 
   // ============================ 样式 ============================
 
@@ -97,7 +98,7 @@
     try { on = localStorage.getItem(QUEUE_KEY) !== '0'; } catch (e) {}
     const box = document.createElement('li');
     box.id = 't2048-queue-switch';
-    box.innerHTML = '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;user-select:none;font-size:13px;padding:0 10px;white-space:nowrap;"><input type="checkbox"' + (on ? ' checked' : '') + '>队列模式</label>';
+    box.innerHTML = '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;user-select:none;color:#fff;font-size:14px;font-weight:700;padding:0 10px;white-space:nowrap;"><input type="checkbox"' + (on ? ' checked' : '') + '>队列模式</label>';
     li.insertAdjacentElement('afterend', box);
     box.querySelector('input').addEventListener('change', e => {
       try { localStorage.setItem(QUEUE_KEY, e.target.checked ? '1' : '0'); } catch (err) {}
