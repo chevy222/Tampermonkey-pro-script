@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      5.7
+// @version      5.8
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（横竖版按原比例、竖图最高 4:3 垂直居中裁切、每行最多 5 张、右上角图片总数角标；打开即全部加载，宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片加载队列对齐移动端节奏（4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 搜索繁忙自动重试；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -16,8 +16,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '5.7') return;
-  document.documentElement.setAttribute('data-sehua', '5.7');
+  if (document.documentElement.getAttribute('data-sehua') === '5.8') return;
+  document.documentElement.setAttribute('data-sehua', '5.8');
 
   // ============================ 可调参数 ============================
 
@@ -73,8 +73,13 @@
 
   // ============================ 工具函数 ============================
 
-  // 站内装饰图特征：静态图标、用户头像、占位图
-  const isPlaceholder = url => ['static/image', 'uc_server', 'none.gif', 'thumb-ing'].some(m => url.includes(m));
+  // 站内装饰图特征：静态图标、用户头像、占位图；另把"无图片扩展名"的地址也视为无效——
+  // 部分技术/资源帖的移动版缩略图是 data/attachment/h 这类截断路径，取到也加载不出来，
+  // 判无效后该帖会进 fallback，从详情页回捞真图
+  const isPlaceholder = url => {
+    if (['static/image', 'uc_server', 'none.gif', 'thumb-ing'].some(m => url.includes(m))) return true;
+    try { return !/\.(jpe?g|png|gif|webp|bmp|svg)$/i.test(new URL(url, location.href).pathname); } catch (e) { return true; }
+  };
 
   // val 为 null 时 new URL 会把它串成 "null" 并返回合法假地址，必须先挡
   const normalizeHttpUrl = val => { if (!val) return null; try { const u = new URL(val, location.href); return u.protocol.startsWith('http') ? u.href : null; } catch (e) { return null; } };
