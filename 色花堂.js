@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      4.4
+// @version      4.5
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（打开即全部加载、宽屏单列、发帖日期搬到标题下，移动版无图的帖子从详情页补图）；详情页宽屏、正文图去懒加载；检索页宽屏单列、缩略图 + 栏目过滤开关 + 搜索繁忙自动刷新重试（5 次）；右下角加载进度胶囊。图片并发交给浏览器，无加载引擎。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -16,8 +16,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '4.4') return;
-  document.documentElement.setAttribute('data-sehua', '4.4');
+  if (document.documentElement.getAttribute('data-sehua') === '4.5') return;
+  document.documentElement.setAttribute('data-sehua', '4.5');
 
   // ============================ 可调参数 ============================
 
@@ -152,16 +152,20 @@
     return task => { queue.push(task); pump(); };
   })();
 
-  // 让一张图进入加载池：设 src（触发请求）→ 挂胶囊监听 → 释放配额
-  function loadImage(img, url) {
+  // 让一张图进入加载池并计入胶囊：建节点时就计数（分母一次定型，不随池调度逐张涨），
+  // src 由池按移动端节奏设置；load/error/超时各结算一次（超时兜底，防黑洞图卡住分母）
+  function trackImage(img, url) {
+    if (img.dataset.watched) return;   // 同一节点只计一次
+    img.dataset.watched = '1';
+    pill.add(1);
     imgLoader(done => {
-      let released = false;
+      let released = false, settledHere = false;
+      const settle = failed => { if (!settledHere) { settledHere = true; pill.settle(failed); } };
       const fin = () => { if (released) return; released = true; clearTimeout(to); done(); };
-      img.addEventListener('load', fin, { once: true });
-      img.addEventListener('error', fin, { once: true });
-      const to = setTimeout(fin, IMG_HOLD_TIMEOUT);
+      const to = setTimeout(() => { fin(); settle(true); }, IMG_HOLD_TIMEOUT);
+      img.addEventListener('load', () => { settle(false); fin(); }, { once: true });
+      img.addEventListener('error', () => { settle(true); fin(); }, { once: true });
       img.setAttribute('src', url);
-      watchImgs([img]);   // src 已设再挂：无 src 的 img.complete 为 true，会误结算
     });
   }
 
@@ -191,7 +195,7 @@
       img.decoding = 'async';
       a.appendChild(img);
       wrap.appendChild(a);
-      loadImage(img, u);   // src 由加载池按移动端节奏设置
+      trackImage(img, u);   // 计数立即定型 + src 由加载池按移动端节奏设置
     });
     if (total > urls.length) {
       wrap.appendChild(Object.assign(document.createElement('span'), { className: 'sehua-num', textContent: total }));
@@ -278,21 +282,6 @@
     }
   };
 
-  // 监听一组图的加载结果；调用时机 = 赋真址/插入 DOM 之后
-  function watchImgs(imgs) {
-    imgs.forEach(img => {
-      if (img.dataset.watched) return;               // 同一节点只计一次
-      img.dataset.watched = '1';
-      pill.add(1);
-      const done = failed => pill.settle(failed);
-      if (img.complete) done(img.naturalWidth === 0);            // 缓存命中：同步结算
-      else {
-        img.addEventListener('load', () => done(false), { once: true });
-        img.addEventListener('error', () => done(true), { once: true });
-      }
-    });
-  }
-
   // ============================ 去广告 ============================
 
   // 垃圾元素 + 表格里非帖子行（公告/空表头/广告行）。
@@ -349,7 +338,7 @@
     removeUnused();
     document.querySelectorAll('#postlist img[file]').forEach(img => {
       const file = img.getAttribute('file'), cur = img.getAttribute('src');
-      if (file && (!cur || isPlaceholder(cur))) loadImage(img, file);   // 换址走加载池
+      if (file && (!cur || isPlaceholder(cur))) trackImage(img, file);   // 计数 + 换址走加载池
       img.setAttribute('lazyloaded', 'true');
     });
   }
