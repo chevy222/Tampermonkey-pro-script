@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048
 // @namespace    https://fby.hfz300.com/
-// @version      4.6
+// @version      4.7
 // @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；去懒加载——列表原生 lazy 与详情页占位图（data-original）一律立即加载，防抖观察者兜底站点改图；图片加载队列（10 张/秒、在途≤10、首屏突发 10），列表页"搜索"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
@@ -37,8 +37,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-t2048') === '4.6') return;
-  document.documentElement.setAttribute('data-t2048', '4.6');
+  if (document.documentElement.getAttribute('data-t2048') === '4.7') return;
+  document.documentElement.setAttribute('data-t2048', '4.7');
 
   // ============================ 样式 ============================
 
@@ -115,12 +115,15 @@
     const start = poolDone => {
       let released = false;
       const release = () => { if (released) return; released = true; clearTimeout(to); if (poolDone) poolDone(); };
-      const to = setTimeout(() => { timedOut = true; settle(true); release(); }, IMG_HOLD_TIMEOUT);
+      const to = setTimeout(() => { timedOut = true; settle(true); pill.markUndecided(); release(); }, IMG_HOLD_TIMEOUT);
       img.addEventListener('load', () => {
-        if (timedOut) pill.correctFailed(); else settle(false);   // 迟到成功：回退失败计数
+        if (timedOut) pill.resolveUndecided(true); else settle(false);   // 迟到成功：解除未决 + 回退失败计数
         release();
       }, { once: true });
-      img.addEventListener('error', () => { settle(true); release(); }, { once: true });
+      img.addEventListener('error', () => {
+        if (timedOut) pill.resolveUndecided(false); else settle(true);   // 迟到失败：只解除未决，失败计数保留
+        release();
+      }, { once: true });
       action();
       // 触发后若图已完成（缓存命中/原本就加载完了），load 事件不会再触发，需同步结算
       if (img.complete) { if (img.naturalWidth > 0) settle(false); else settle(true); release(); }
@@ -184,7 +187,7 @@
   // 只统计脚本触发加载的图，原生 load/error 即结算，全部完成后延迟淡出
 
   const pill = {
-    total: 0, settled: 0, failed: 0, el: null, timer: null,
+    total: 0, settled: 0, failed: 0, undecided: 0, el: null, timer: null, undecidedTimer: null,
 
     add(n) {
       this.total += n;
@@ -201,16 +204,34 @@
       if (this.el && this.el.isConnected) this.render();
     },
 
+    // 超时只释放配额，图仍在等真实结果——记为"未决"，胶囊不算完成、不淡出，直到迟到落地或兜底到期
+    markUndecided() {
+      this.undecided++;
+      if (!this.undecidedTimer) this.undecidedTimer = setTimeout(() => { this.undecidedTimer = null; this.undecided = 0; this.render(); }, IMG_HOLD_TIMEOUT * 2);
+      this.render();
+    },
+
+    // 未决图落地：解除未决；lateOk 时同时回退失败计数
+    resolveUndecided(lateOk) {
+      clearTimeout(this.undecidedTimer); this.undecidedTimer = null;
+      if (this.undecided > 0) this.undecided--;
+      if (lateOk) this.correctFailed();
+      else this.render();
+    },
+
     render() {
       if (!this.total) return;
       const el = this.mount(); if (!el) return;
-      const done = this.settled >= this.total;
+      const done = this.settled >= this.total && this.undecided === 0;
       el.classList.toggle('thumb-progress-done', done && !this.failed);
       el.classList.toggle('thumb-progress-partial', done && this.failed > 0);
+      const notes = [];
+      if (this.failed) notes.push(`${this.failed} 张失败`);
+      if (this.undecided) notes.push(`${this.undecided} 张等待中`);
       el.textContent = done
         ? (this.failed ? `缩略图 ${this.total - this.failed}/${this.total}（${this.failed} 张失败）` : `缩略图 ${this.total} 张已加载`)
-        // 分子统一用"成功数"（settled - failed），与终态语义一致
-        : `缩略图已成功 ${this.settled - this.failed}/${this.total}${this.failed ? `（${this.failed} 张失败）` : ''}`;
+        // 分子统一用"成功数"，与终态语义一致
+        : `缩略图已成功 ${this.settled - this.failed}/${this.total}${notes.length ? `（${notes.join(' · ')}）` : ''}`;
       if (done && !this.timer) this.timer = setTimeout(() => { this.timer = null; this.hide(); }, PILL_HIDE_DELAY);
     },
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      5.8
+// @version      5.9
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（横竖版按原比例、竖图最高 4:3 垂直居中裁切、每行最多 5 张、右上角图片总数角标；打开即全部加载，宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片加载队列对齐移动端节奏（4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 搜索繁忙自动重试；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -16,8 +16,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '5.8') return;
-  document.documentElement.setAttribute('data-sehua', '5.8');
+  if (document.documentElement.getAttribute('data-sehua') === '5.9') return;
+  document.documentElement.setAttribute('data-sehua', '5.9');
 
   // ============================ 可调参数 ============================
 
@@ -207,13 +207,16 @@
     const start = poolDone => {
       let released = false;
       const release = () => { if (released) return; released = true; clearTimeout(to); if (poolDone) poolDone(); };
-      const to = setTimeout(() => { timedOut = true; settle(true); release(); }, IMG_HOLD_TIMEOUT);
+      const to = setTimeout(() => { timedOut = true; settle(true); pill.markUndecided(); release(); }, IMG_HOLD_TIMEOUT);
       img.addEventListener('load', () => {
         markOrientation();
-        if (timedOut) pill.correctFailed(); else settle(false);   // 迟到成功：回退失败计数
+        if (timedOut) pill.resolveUndecided(true); else settle(false);   // 迟到成功：解除未决 + 回退失败计数
         release();
       }, { once: true });
-      img.addEventListener('error', () => { settle(true); release(); }, { once: true });
+      img.addEventListener('error', () => {
+        if (timedOut) pill.resolveUndecided(false); else settle(true);   // 迟到失败：只解除未决，失败计数保留
+        release();
+      }, { once: true });
       if (url) img.setAttribute('src', url);
       // 设 src（或接管直出图）后若图已完成（缓存命中），load 事件不会再触发，需同步结算
       if (img.complete) { if (img.naturalWidth > 0) { markOrientation(); settle(false); } else settle(true); release(); }
@@ -302,7 +305,7 @@
   // 不感知图床、不做请求调度：浏览器挂起的请求就如实显示 x/y
 
   const pill = {
-    total: 0, settled: 0, failed: 0, el: null, timer: null,
+    total: 0, settled: 0, failed: 0, undecided: 0, el: null, timer: null, undecidedTimer: null,
 
     add(n) {
       this.total += n;
@@ -321,16 +324,36 @@
       if (this.el && this.el.isConnected) this.render();
     },
 
+    // 超时只释放配额，图仍在等待真实结果——记为"未决"：胶囊不算完成、不淡出，
+    // 直到该图迟到落地（load/error）或兜底到期，避免"十几秒就没了但图还在加载"
+    markUndecided() {
+      this.undecided++;
+      // 黑洞图永不回调时的兜底：再等一个超时周期就强制结案，避免胶囊永久停留
+      if (!this.undecidedTimer) this.undecidedTimer = setTimeout(() => { this.undecidedTimer = null; this.undecided = 0; this.render(); }, IMG_HOLD_TIMEOUT * 2);
+      this.render();
+    },
+
+    // 未决图落地：解除未决；lateOk 时同时回退失败计数（与可见性解耦）
+    resolveUndecided(lateOk) {
+      clearTimeout(this.undecidedTimer); this.undecidedTimer = null;
+      if (this.undecided > 0) this.undecided--;
+      if (lateOk) this.correctFailed();
+      else this.render();
+    },
+
     render() {
       if (!this.total) return;
       const el = this.mount(); if (!el) return;
-      const done = this.settled >= this.total;
+      const done = this.settled >= this.total && this.undecided === 0;
       el.classList.toggle('sehua-done', done && !this.failed);
       el.classList.toggle('sehua-partial', done && this.failed > 0);
+      const notes = [];
+      if (this.failed) notes.push(`${this.failed} 张失败`);
+      if (this.undecided) notes.push(`${this.undecided} 张等待中`);
       el.textContent = done
         ? (this.failed ? `缩略图 ${this.total - this.failed}/${this.total}（${this.failed} 张失败）` : `缩略图 ${this.total} 张已加载`)
         // 分子统一用"成功数"（settled - failed），与终态语义一致：中间态不会有"分子+失败>分母"，终态切换时分子只增不减
-        : `缩略图已成功 ${this.settled - this.failed}/${this.total}${this.failed ? `（${this.failed} 张失败）` : ''}`;
+        : `缩略图已成功 ${this.settled - this.failed}/${this.total}${notes.length ? `（${notes.join(' · ')}）` : ''}`;
       if (done && !this.timer) this.timer = setTimeout(() => { this.timer = null; this.hide(); }, PILL_HIDE_DELAY);
     },
 
