@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      4.8
+// @version      4.9
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（横竖版按原比例、竖图最高 4:3 垂直居中裁切、每行最多 5 张、右上角图片总数角标；打开即全部加载，宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片加载队列对齐移动端节奏（4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 搜索繁忙自动重试；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -16,8 +16,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '4.8') return;
-  document.documentElement.setAttribute('data-sehua', '4.8');
+  if (document.documentElement.getAttribute('data-sehua') === '4.9') return;
+  document.documentElement.setAttribute('data-sehua', '4.9');
 
   // ============================ 可调参数 ============================
 
@@ -65,8 +65,8 @@
   const IMG_START_PER_SEC = 4;
   const IMG_TOKEN_CAP = 6;
 
-  // 单张图最多占用配额多久再兜底释放（旧图床 wkt41.app 会黑洞挂起，不释放会卡死池）
-  const IMG_HOLD_TIMEOUT = 15000;
+  // 单张图最多占用配额多久再兜底释放（旧图床 wkt41.app 会黑洞挂起；限流时挂起的图也靠它快速判定失败，避免 6 个并发槽被死图吃满）
+  const IMG_HOLD_TIMEOUT = 10000;
 
   // 队列模式开关状态的 localStorage 键名（'0'=关闭，恢复旧的一次性全量加载）
   const QUEUE_KEY = 'sehuaQueueMode';
@@ -309,7 +309,7 @@
       el.classList.toggle('sehua-partial', done && this.failed > 0);
       el.textContent = done
         ? (this.failed ? `缩略图 ${this.total - this.failed}/${this.total}（${this.failed} 张失败）` : `缩略图 ${this.total} 张已加载`)
-        : `缩略图已完成 ${this.settled}/${this.total}${this.failed ? `（${this.failed} 张失败）` : ''}`;
+        : `缩略图已完成 ${this.settled}/${this.total}${this.failed ? `（其中 ${this.failed} 张失败）` : ''}`;
       if (done && !this.timer) this.timer = setTimeout(() => { this.timer = null; this.hide(); }, PILL_HIDE_DELAY);
     },
 
