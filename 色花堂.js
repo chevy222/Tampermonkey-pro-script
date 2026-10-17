@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      4.1
+// @version      4.2
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（打开即全部加载、宽屏单列、发帖日期搬到标题下，移动版无图的帖子从详情页补图）；详情页宽屏、正文图去懒加载；检索页宽屏单列、缩略图 + 栏目过滤开关 + 搜索繁忙自动刷新重试（5 次）；右下角加载进度胶囊。图片并发交给浏览器，无加载引擎。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -16,8 +16,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '4.1') return;
-  document.documentElement.setAttribute('data-sehua', '4.1');
+  if (document.documentElement.getAttribute('data-sehua') === '4.2') return;
+  document.documentElement.setAttribute('data-sehua', '4.2');
 
   // ============================ 可调参数 ============================
 
@@ -88,21 +88,23 @@
   }));
 
   // 移动版触屏模板取图（筛选参数透传）。
-  // 返回 {map, fallback}：map=tid->图址列表；fallback=有卡无图的 tid。
+  // 返回 {map, fallback, totals}：map=tid->图址列表；fallback=有卡无图的 tid；
+  // totals=tid->该帖图片总数（卡片右上角 .zttpsz，用于列表角标）。
   // null=被拦/失败由调用方重试；空页返回空对象，不重试
   const fetchMobileThumbs = (fid, page) => {
     const pairs = ['mobile=2'], sp = new URLSearchParams(location.search);
     ['filter', 'orderby', 'typeid', 'specialtype'].forEach(k => { if (sp.get(k)) pairs.push(k + '=' + encodeURIComponent(sp.get(k))); });
     return gmGet(`https://${location.hostname}/forum-${fid}-${page}.html?${pairs.join('&')}`, text => {
-      const map = {}, fallback = [];
+      const map = {}, fallback = [], totals = {};
       new DOMParser().parseFromString(text, 'text/html').querySelectorAll('.n5_htmk').forEach(el => {
         const tid = (el.querySelector('a[href*=viewthread]')?.href.match(/tid=(\d+)/) || [])[1];
         if (!tid) return;
         const urls = [];
         el.querySelectorAll('img').forEach(img => { const s = getRealSrc(img); if (s && !urls.includes(s)) urls.push(s); });
-        if (urls.length) map[tid] = urls; else fallback.push(tid);
+        const total = +(el.querySelector('.zttpsz')?.textContent || '').trim() || 0;
+        if (urls.length) { map[tid] = urls; if (total) totals[tid] = total; } else fallback.push(tid);
       });
-      return { map, fallback };
+      return { map, fallback, totals };
     });
   };
 
@@ -128,8 +130,9 @@
   // 宽度规则：1 张占半行，多张均分（扣除间距）
   const thumbWidthRule = n => n <= 1 ? '50%' : `calc((100% - ${(n - 1) * THUMB_GAP}px) / ${n})`;
 
-  // DOM-API 构造缩略图容器——不能 innerHTML 拼 URL，图址含引号会破坏结构
-  function createThumbWrap(tid, urls) {
+  // DOM-API 构造缩略图容器——不能 innerHTML 拼 URL，图址含引号会破坏结构。
+  // total=该帖图片总数（移动版角标值），有则右上角显示角标（对齐移动端语义）
+  function createThumbWrap(tid, urls, total) {
     const wrap = document.createElement('div');
     wrap.className = 'sehua-thumb';
     wrap.style.setProperty('--img-width', thumbWidthRule(urls.length));
@@ -144,6 +147,9 @@
       a.appendChild(img);
       wrap.appendChild(a);
     });
+    if (total > urls.length) {
+      wrap.appendChild(Object.assign(document.createElement('span'), { className: 'sehua-num', textContent: total }));
+    }
     return wrap;
   }
 
@@ -162,9 +168,10 @@
 
   // 缩略图版式（含宽屏底）
   const THUMB_CSS = WIDE_CSS + `
-    .sehua-thumb { --img-width: 50%; display: flex; flex-wrap: wrap; justify-content: center; gap: ${THUMB_GAP}px; margin-top: 8px; }
-    .sehua-thumb img { height: auto !important; aspect-ratio: 3/2; object-fit: cover; border-radius: 4px; border: 1px solid #ddd; background: #f5f5f5; box-sizing: border-box !important; width: 100% !important; }
-    .sehua-thumb > a { display: flex; align-items: center; justify-content: center; text-decoration: none; width: var(--img-width) !important; position: relative; }
+    .sehua-thumb { --img-width: 50%; position: relative; display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start; gap: ${THUMB_GAP}px; margin-top: 8px; }
+    .sehua-thumb img { height: auto !important; border-radius: 4px; border: 1px solid #ddd; background: #f5f5f5; box-sizing: border-box !important; width: 100% !important; display: block; }
+    .sehua-thumb > a { display: block; text-decoration: none; width: var(--img-width) !important; }
+    .sehua-num { position: absolute; right: 8px; top: 8px; z-index: 1; padding: 0 6px; height: 18px; line-height: 18px; font-size: 11px; color: #fff; background: rgba(0, 0, 0, 0.55); border-radius: 3px; pointer-events: none; }
     .sehua-date { display: inline-block; margin: 4px 0 0 8px; font-size: 12px; color: #999; }
   `;
 
@@ -272,7 +279,7 @@
     // 移动版映射：仅被拦（null）才重试，空页不重试
     let r = null;
     for (let i = 0; i < MOBILE_RETRY_TIMES && !r; i++) { if (i) await sleep(MOBILE_RETRY_DELAY); r = await fetchMobileThumbs(fid, m ? +m[2] : (+p.get('page') || 1)); }
-    const map = r ? r.map : {}, fallback = r ? r.fallback : [];
+    const map = r ? r.map : {}, fallback = r ? r.fallback : [], totals = r ? (r.totals || {}) : {};
 
     const wraps = [];
     document.querySelectorAll('#threadlisttableid tr').forEach(tr => {
@@ -281,7 +288,7 @@
       relocateDate(tr, th);
       tr.querySelectorAll('td').forEach(td => td.remove());   // 单列化：删掉作者/回复等列
       const tid = (tbody.id.match(/\d+/) || [])[0];
-      if (map[tid] && !th.querySelector('.sehua-thumb')) { const w = createThumbWrap(tid, map[tid]); th.appendChild(w); wraps.push(w); }
+      if (map[tid] && !th.querySelector('.sehua-thumb')) { const w = createThumbWrap(tid, map[tid], totals[tid]); th.appendChild(w); wraps.push(w); }
     });
     watchImgs(wraps.flatMap(w => [...w.querySelectorAll('img')]));
 
