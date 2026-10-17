@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      5.1
+// @version      5.2
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（横竖版按原比例、竖图最高 4:3 垂直居中裁切、每行最多 5 张、右上角图片总数角标；打开即全部加载，宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片加载队列对齐移动端节奏（4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 搜索繁忙自动重试；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -16,8 +16,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '5.1') return;
-  document.documentElement.setAttribute('data-sehua', '5.1');
+  if (document.documentElement.getAttribute('data-sehua') === '5.2') return;
+  document.documentElement.setAttribute('data-sehua', '5.2');
 
   // ============================ 可调参数 ============================
 
@@ -188,6 +188,7 @@
 
   // 让一张图计入胶囊并开始加载：建节点时立即计数（分母一次定型），
   // 队列模式走加载池（对齐移动端节奏），关闭队列则立即发请求（旧行为）；
+  // url 为 null 表示图已由站点直出真址、脚本只接管计数与结算（不改 src，避免重发请求）
   // load/error/超时各结算一次（超时兜底，防黑洞图卡住分母）
   function trackImage(img, url) {
     if (img.dataset.watched) return;   // 同一节点只计一次
@@ -206,11 +207,12 @@
       const to = setTimeout(() => { settle(true); release(); }, IMG_HOLD_TIMEOUT);
       img.addEventListener('load', () => { markOrientation(); settle(false); release(); }, { once: true });
       img.addEventListener('error', () => { settle(true); release(); }, { once: true });
-      img.setAttribute('src', url);
-      // 设 src 后若图已完成（缓存命中），load 事件不会再触发，需同步结算
+      if (url) img.setAttribute('src', url);
+      // 设 src（或接管直出图）后若图已完成（缓存命中），load 事件不会再触发，需同步结算
       if (img.complete) { if (img.naturalWidth > 0) { markOrientation(); settle(false); } else settle(true); release(); }
     };
-    if (queueEnabled) imgLoader.load(start); else start(null);
+    if (!url) start(null);
+    else if (queueEnabled) imgLoader.load(start); else start(null);
   }
 
   // ============================ 缩略图 ============================
@@ -387,7 +389,9 @@
     removeUnused();
     document.querySelectorAll('#postlist img[file]').forEach(img => {
       const file = img.getAttribute('file'), cur = img.getAttribute('src');
-      if (file && (!cur || isPlaceholder(cur))) trackImage(img, file);   // 计数 + 换址走加载池
+      if (!file) return;
+      // 占位图换址走加载池；站点已直出真址的图只计入胶囊（不重设 src，避免重发请求）
+      trackImage(img, (!cur || isPlaceholder(cur)) ? file : null);
       img.setAttribute('lazyloaded', 'true');
     });
   }
