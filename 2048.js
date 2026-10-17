@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048
 // @namespace    https://fby.hfz300.com/
-// @version      4.4
+// @version      4.5
 // @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；去懒加载——列表原生 lazy 与详情页占位图（data-original）一律立即加载，防抖观察者兜底站点改图；图片加载队列（10 张/秒、在途≤10、首屏突发 10），列表页"搜索"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
@@ -37,8 +37,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-t2048') === '4.4') return;
-  document.documentElement.setAttribute('data-t2048', '4.4');
+  if (document.documentElement.getAttribute('data-t2048') === '4.5') return;
+  document.documentElement.setAttribute('data-t2048', '4.5');
 
   // ============================ 样式 ============================
 
@@ -111,13 +111,16 @@
     if (img.dataset.watched) return;   // 同一节点只计一次
     img.dataset.watched = '1';
     pill.add(1);
-    let settledHere = false;
+    let settledHere = false, timedOut = false;
     const settle = failed => { if (!settledHere) { settledHere = true; pill.settle(failed); } };
     const start = poolDone => {
       let released = false;
       const release = () => { if (released) return; released = true; clearTimeout(to); if (poolDone) poolDone(); };
-      const to = setTimeout(() => { settle(true); release(); }, IMG_HOLD_TIMEOUT);
-      img.addEventListener('load', () => { settle(false); release(); }, { once: true });
+      const to = setTimeout(() => { timedOut = true; settle(true); release(); }, IMG_HOLD_TIMEOUT);
+      img.addEventListener('load', () => {
+        if (timedOut) pill.correctFailed(); else settle(false);   // 迟到成功：回退失败计数
+        release();
+      }, { once: true });
       img.addEventListener('error', () => { settle(true); release(); }, { once: true });
       action();
       // 触发后若图已完成（缓存命中/原本就加载完了），load 事件不会再触发，需同步结算
@@ -192,6 +195,12 @@
     },
 
     settle(failed) { this.settled++; if (failed) this.failed++; this.render(); },
+
+    // 超时判失败后图又延迟加载成功：回退失败计数（胶囊已淡出则不纠正也不重建）
+    correctFailed() {
+      if (!this.el || !this.el.isConnected) return;
+      if (this.failed > 0) { this.failed--; this.render(); }
+    },
 
     render() {
       if (!this.total) return;
