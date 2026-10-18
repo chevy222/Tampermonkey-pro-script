@@ -63,7 +63,7 @@ window.runTest = async (name) => {
         ok('广告文本已删', !d.querySelector('.show-text.cl'));
         ok('分类行已删', !d.getElementById('cats'));
         ok('保留 #separatorline（站点 forumchecknew 依赖，删了会报 parentNode 错误）', !!d.getElementById('separatorline'));
-        ok('保留"查看新帖"入口行（.show-text2）', !!d.querySelector('#threadlisttableid .show-text2'));
+        ok('.show-text2 广告已删（它是赌博广告链，非"查看新帖"入口——那靠站点 AJAX 插入 #forumnewshow）', !d.querySelector('#threadlisttableid .show-text2'));
         ok('非帖子行的多列行已删（否则 table-layout:fixed 把标题压进 30px 图标列）', !d.querySelector('#threadlisttableid .thhead') && d.querySelectorAll('#separatorline tr').length === 0);
         ok('宽屏+缩略图样式在页', [...d.querySelectorAll('style')].some(s => s.textContent.indexOf('.sehua-thumb') !== -1 && s.textContent.indexOf('table-layout: fixed') !== -1));
         ok('GM 共 3 次（映射1 + 回捞2：102/107）', calls.length === 3);
@@ -288,7 +288,7 @@ window.runTest = async (name) => {
       ],
       assert: ({ ok, d, calls }) => {
         const total = d.querySelectorAll('.sehua-thumb img').length;
-        ok('哨兵占位', d.documentElement.getAttribute('data-sehua') === '5.15');
+        ok('哨兵占位', d.documentElement.getAttribute('data-sehua') === '5.16');
         ok('双跑第二次被哨兵拦截', calls.length === 3);
         ok('GM 共 3 次（1 映射 + 2 回捞，无重复请求）', calls.length === 3 && calls.some(u => /tid=102/.test(u)) && calls.some(u => /tid=107/.test(u)));
         ok('双跑不重复注入（仍 6 张）', total === 6);
