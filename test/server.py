@@ -93,6 +93,14 @@ DETAIL_PRELOADED_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><tit
 <div><img src="static/image/icon.png"></div>
 </div></div></div></body></html>""".replace('__IMG__', IMG_URL)
 
+# 判定"图址是否有效"的专用页：验证新版 isPlaceholder 只认坏特征、不按扩展名白名单误杀
+MODERN_LIST_PAGE = LIST_PAGE.replace(
+    '<tbody id="normalthread_107">',
+    '<tbody id="normalthread_201"><tr><th><a href="#">query带路径帖</a></th><td class="by"><em class="xg1">2026-10-18 11:00</em></td><td>author</td><td>1</td></tr></tbody>'
+    '<tbody id="normalthread_202"><tr><th><a href="#">无扩展名CDN帖</a></th><td class="by"><em class="xg1">2026-10-18 11:05</em></td><td>author</td><td>1</td></tr></tbody>'
+    '<tbody id="normalthread_203"><tr><th><a href="#">截断坏址帖</a></th><td class="by"><em class="xg1">2026-10-18 11:10</em></td><td>author</td><td>1</td></tr></tbody>'
+    '<tbody id="normalthread_107">')
+
 SEARCH_RESULT_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>search</title></head><body><div class="wp"><div id="ct">
 <div class="sttl mbn"><div class="sttl_switch">版块筛选</div></div>
 <div class="slst mtw"><ul id="threadlist">
@@ -145,6 +153,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             html = SEARCH_BUSY_PAGE if q.get('busy') else (SEARCH_COOLDOWN_PAGE if q.get('cooldown') else SEARCH_RESULT_PAGE)
         elif path == '/forum-95-1.html':
             html = LIST_PAGE
+        elif path == '/forum-96-1.html':
+            html = MODERN_LIST_PAGE
         elif path == '/forum.php':
             html = HOME_PAGE
         elif path == '/thread-101-1-1.html':
@@ -172,6 +182,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             body = open(os.path.join(REPO, '2048.js'), encoding='utf-8').read().encode('utf-8')
             return self._send(body, 'text/javascript; charset=utf-8')
         elif path == '/img.gif':
+            return self._send(IMG_BYTES, 'image/gif')
+        elif path == '/i/8899':
+            # 无扩展名的 CDN 路径（验证不会被 isPlaceholder 误判成坏图）
             return self._send(IMG_BYTES, 'image/gif')
         elif path == '/wide.svg':
             return self._send(b'<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90"><rect width="160" height="90" fill="#c33"/></svg>', 'image/svg+xml')

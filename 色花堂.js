@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      5.17
+// @version      5.18
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（默认 4:3 横框，竖图加载完成后切 3:4 竖框，均居中裁切不拉伸；每行最多 5 张；右上角图片总数角标；宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片按队列节奏加载（默认 4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 搜索繁忙自动重试；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -16,8 +16,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '5.17') return;
-  document.documentElement.setAttribute('data-sehua', '5.17');
+  if (document.documentElement.getAttribute('data-sehua') === '5.18') return;
+  document.documentElement.setAttribute('data-sehua', '5.18');
 
   // ============================ 可调参数 ============================
 
@@ -74,13 +74,17 @@
 
   // ============================ 工具函数 ============================
 
-  // 站内装饰图特征：静态图标、用户头像、占位图；另把"无图片扩展名"的地址也视为无效——
-  // 部分技术/资源帖的移动版缩略图是 data/attachment/h 这类截断路径，取到也加载不出来，
-  // 判无效后该帖会进 fallback，从详情页回捞真图。
-  // 扩展名白名单要把图床实际会发的格式都列上，漏一个就等于把真图误判成占位（白跑一次回捞）
+  // 判"这个地址不可能是图"，只认**明确的坏特征**，不做"没有扩展名就拒绝"。
+  // 两个来源：
+  //   1. 站内装饰图：静态图标、用户头像、占位图
+  //   2. 站内被截断的附件路径：/data/attachment/h 这种末段只有 1-2 个字符、没有文件名的残址
+  //      （真实附件名都是 forum/202610/17/172401p60httd033udmrqx.png 这种长串）
+  // 为什么不用扩展名白名单：白名单意味着"不认识的格式一律当坏图"，图床每出一个新格式
+  // （avif/jfif/heic/…）就得补一次，漏一个就把真图误判成占位、白跑一次详情页回捞；
+  // 而 query 里带扩展名的（/resize?url=/photo/x.jpg）和无扩展名的 CDN（/i/8899）永远补不进来
   const isPlaceholder = url => {
     if (['static/image', 'uc_server', 'none.gif', 'thumb-ing'].some(m => url.includes(m))) return true;
-    try { return !/\.(jpe?g|png|gif|webp|bmp|svg|avif|jfif|heic|heif|apng)$/i.test(new URL(url, location.href).pathname); } catch (e) { return true; }
+    try { return /\/data\/attachment\/[^/.]{0,2}$/.test(new URL(url, location.href).pathname); } catch (e) { return true; }
   };
 
   // val 为 null 时 new URL 会把它串成 "null" 并返回合法假地址，必须先挡

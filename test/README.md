@@ -16,6 +16,7 @@ python test/server.py
 | 路径 | 对应真实页面 |
 |---|---|
 | `/forum-95-1.html` | 色花堂列表页（SEO 静态 URL） |
+| `/forum-96-1.html` | 色花堂列表页（图址判据专用：query 带路径 / 无扩展名 CDN / 截断坏址） |
 | `/forum.php` | 色花堂首页 |
 | `/thread-101-1-1.html` | 色花堂详情页（占位图） |
 | `/thread-102-1-1.html` | 色花堂详情页（站点已直出真址） |
@@ -45,7 +46,7 @@ python test/server.py
 
 **色花堂**：`sehua-list`、`sehua-layout`、`sehua-detail`、`sehua-detail-preloaded`、
 `sehua-double`、`sehua-throttle`、`sehua-home`、`sehua-late-success`、`sehua-blackhole-peer`、
-`sehua-late-then-error`
+`sehua-late-then-error`、`sehua-modern-url`
 
 **2048**：`t2048-list`、`t2048-switch`、`t2048-read`、`t2048-late-src`、`t2048-ajax`、
 `t2048-queue-off`、`t2048-late-success`、`t2048-batch-refresh`

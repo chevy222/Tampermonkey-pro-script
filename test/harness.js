@@ -11,6 +11,12 @@ window.runTest = async (name) => {
   const SRC_T2048 = await (await fetch('/t2048.js?t=' + Date.now())).text();
 
   // ---- 罐装 XHR 响应（色花堂）----
+  // isPlaceholder 判据专用：201 是 query 带扩展名、202 是纯数字路径（都无扩展名），203 是站内截断坏址
+  const MODERN_LIST = '<html><body>' +
+    '<div class="n5_htmk"><a href="https://bhagq.4yl7j.com/viewthread.php?tid=201">甲</a><img file="http://127.0.0.1:8765/img.gif?url=/photo/pic_8899"></div>' +
+    '<div class="n5_htmk"><a href="https://bhagq.4yl7j.com/viewthread.php?tid=202">乙</a><img file="http://127.0.0.1:8765/i/8899"></div>' +
+    '<div class="n5_htmk"><a href="https://bhagq.4yl7j.com/viewthread.php?tid=203">丙</a><img file="data/attachment/h"></div>' +
+    '</body></html>';
   const MOBILE_LIST = '<html><body>' +
     '<div class="n5_htmk"><div class="zttpsl cl"><span class="zttpsz">7</span></div><a href="https://bhagq.4yl7j.com/viewthread.php?tid=101">甲</a><img file="http://127.0.0.1:8765/slow.gif"></div>' +
     '<div class="n5_htmk"><a href="https://bhagq.4yl7j.com/viewthread.php?tid=102">乙</a></div>' +
@@ -186,6 +192,23 @@ window.runTest = async (name) => {
         ok('账目自洽（成功+失败+等待 = 共）', !!v && v.ok + v.fail + v.wait === v.total);
       }
     },
+    // isPlaceholder 判据：只认坏特征，不按扩展名白名单误杀。
+    // 三个帖子分别覆盖：query 里带扩展名、无扩展名的 CDN 路径、站内截断坏址
+    'sehua-modern-url': {
+      src: SRC_SEHUA, wait: 9000, pillId: 'sehua-progress',
+      gm: [
+        { re: /forum-\d+-\d+\.html/, html: MODERN_LIST },
+        { re: /mod=viewthread&tid=(\d+)/, html: DETAIL_HTML }
+      ],
+      assert: ({ ok, d, calls }) => {
+        const i201 = d.querySelector('#normalthread_201 .sehua-thumb img');
+        const i202 = d.querySelector('#normalthread_202 .sehua-thumb img');
+        ok('query 里带路径的地址直接注入（不再因"无扩展名"被误判）', !!i201 && /img\.gif\?url=/.test(i201.getAttribute('src') || ''));
+        ok('无扩展名的 CDN 路径直接注入（不再误判）', !!i202 && /\/i\/8899/.test(i202.getAttribute('src') || ''));
+        ok('站内截断坏址 data/attachment/h 仍判无效 → 走详情页回捞', calls.some(u => /tid=203/.test(u)));
+        ok('截断坏址帖经回捞后也有缩略图', !!d.querySelector('#normalthread_203 .sehua-thumb img'));
+      }
+    },
     'sehua-detail': {
       src: SRC_SEHUA, wait: 4000, pillId: 'sehua-progress', watchPill: true,
       assert: ({ ok, d, pillLog }) => {
@@ -288,7 +311,7 @@ window.runTest = async (name) => {
       ],
       assert: ({ ok, d, calls }) => {
         const total = d.querySelectorAll('.sehua-thumb img').length;
-        ok('哨兵占位', d.documentElement.getAttribute('data-sehua') === '5.17');
+        ok('哨兵占位', d.documentElement.getAttribute('data-sehua') === '5.18');
         ok('双跑第二次被哨兵拦截', calls.length === 3);
         ok('GM 共 3 次（1 映射 + 2 回捞，无重复请求）', calls.length === 3 && calls.some(u => /tid=102/.test(u)) && calls.some(u => /tid=107/.test(u)));
         ok('双跑不重复注入（仍 6 张）', total === 6);
