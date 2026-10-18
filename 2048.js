@@ -93,11 +93,9 @@
     const link = [...document.querySelectorAll('a')].find(a => (a.textContent || '').trim() === '搜索' && a.getBoundingClientRect().width > 0);
     const li = link && link.closest('li');
     if (!li) return;
-    let on = true;
-    try { on = localStorage.getItem(QUEUE_KEY) !== '0'; } catch (e) {}
     const box = document.createElement('li');
     box.id = 't2048-queue-switch';
-    box.innerHTML = '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;user-select:none;color:#fff;font-size:14px;font-weight:700;padding:0 10px;white-space:nowrap;"><input type="checkbox"' + (on ? ' checked' : '') + '>队列模式</label>';
+    box.innerHTML = '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;user-select:none;color:#fff;font-size:14px;font-weight:700;padding:0 10px;white-space:nowrap;"><input type="checkbox"' + (queueEnabled ? ' checked' : '') + '>队列模式</label>';
     li.insertAdjacentElement('afterend', box);
     box.querySelector('input').addEventListener('change', e => {
       try { localStorage.setItem(QUEUE_KEY, e.target.checked ? '1' : '0'); } catch (err) {}
