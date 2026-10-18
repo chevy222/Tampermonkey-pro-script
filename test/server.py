@@ -101,6 +101,13 @@ MODERN_LIST_PAGE = LIST_PAGE.replace(
     '<tbody id="normalthread_203"><tr><th><a href="#">截断坏址帖</a></th><td class="by"><em class="xg1">2026-10-18 11:10</em></td><td>author</td><td>1</td></tr></tbody>'
     '<tbody id="normalthread_107">')
 
+# 移动版详情页回捞专用：301 的详情页正文有图、302 只有头像
+MOBILE_DETAIL_LIST_PAGE = LIST_PAGE.replace(
+    '<tbody id="normalthread_107">',
+    '<tbody id="normalthread_301"><tr><th><a href="#">移动版回捞有图帖</a></th><td class="by"><em class="xg1">2026-10-18 12:00</em></td><td>author</td><td>1</td></tr></tbody>'
+    '<tbody id="normalthread_302"><tr><th><a href="#">移动版回捞无图帖</a></th><td class="by"><em class="xg1">2026-10-18 12:05</em></td><td>author</td><td>1</td></tr></tbody>'
+    '<tbody id="normalthread_107">')
+
 SEARCH_RESULT_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>search</title></head><body><div class="wp"><div id="ct">
 <div class="sttl mbn"><div class="sttl_switch">版块筛选</div></div>
 <div class="slst mtw"><ul id="threadlist">
@@ -155,6 +162,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             html = LIST_PAGE
         elif path == '/forum-96-1.html':
             html = MODERN_LIST_PAGE
+        elif path == '/forum-97-1.html':
+            html = MOBILE_DETAIL_LIST_PAGE
         elif path == '/forum.php':
             html = HOME_PAGE
         elif path == '/thread-101-1-1.html':

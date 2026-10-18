@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      5.18
+// @version      5.19
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（默认 4:3 横框，竖图加载完成后切 3:4 竖框，均居中裁切不拉伸；每行最多 5 张；右上角图片总数角标；宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片按队列节奏加载（默认 4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 搜索繁忙自动重试；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -16,8 +16,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '5.18') return;
-  document.documentElement.setAttribute('data-sehua', '5.18');
+  if (document.documentElement.getAttribute('data-sehua') === '5.19') return;
+  document.documentElement.setAttribute('data-sehua', '5.19');
 
   // ============================ 可调参数 ============================
 
@@ -143,9 +143,14 @@
   // 详情页抽图；null=被拦/超时（可重试），[]=帖子里没图（终态）
   const fetchDetailImages = tid => (async () => {
     for (let i = 0; i < DETAIL_MAX_TRIES; i++) {
+      // 详情页抽图；null=被拦/超时（可重试），[]=帖子里没图（终态）。
+      // gmGet 带的是移动 UA，站点会返回**触屏模板**——它没有 .t_f / .pcb（PC 版容器），
+      // 正文图挂在 .plc（楼层）里，实测 3805180 上旧选择器只能命中 0 张、加 .plc 后能取到正文图。
+      // 真机验证：6 个帖子里 5 个确实无图（新旧选择器都返回 0，头像被 getRealSrc 过滤掉），
+      // 只有 3805180 有图但旧选择器漏了——所以这里必须同时覆盖两套模板
       const r = await gmGet(`https://${location.hostname}/forum.php?mod=viewthread&tid=${tid}`, text => {
         const urls = [];
-        new DOMParser().parseFromString(text, 'text/html').querySelectorAll('.t_f img, .pcb img, .message img').forEach(img => {
+        new DOMParser().parseFromString(text, 'text/html').querySelectorAll('.t_f img, .pcb img, .message img, .plc img').forEach(img => {
           const u = getRealSrc(img);
           if (u && !urls.includes(u) && urls.length < MAX_DETAIL_IMGS) urls.push(u);
         });

@@ -12,6 +12,11 @@ window.runTest = async (name) => {
 
   // ---- 罐装 XHR 响应（色花堂）----
   // isPlaceholder 判据专用：201 是 query 带扩展名、202 是纯数字路径（都无扩展名），203 是站内截断坏址
+  // 移动版列表：两张"有卡无图"的卡片（真实场景里移动版卡片只给头像、不给帖子图）
+  const MOBILE_CARD_LIST = '<html><body>' +
+    '<div class="n5_htmk"><a href="https://bhagq.4yl7j.com/viewthread.php?tid=301">甲</a><img src="/uc_server/data/avatar/000/45/97/46_avatar_small.jpg"></div>' +
+    '<div class="n5_htmk"><a href="https://bhagq.4yl7j.com/viewthread.php?tid=302">乙</a><img src="/uc_server/data/avatar/000/61/28/04_avatar_small.jpg"></div>' +
+    '</body></html>';
   const MODERN_LIST = '<html><body>' +
     '<div class="n5_htmk"><a href="https://bhagq.4yl7j.com/viewthread.php?tid=201">甲</a><img file="http://127.0.0.1:8765/img.gif?url=/photo/pic_8899"></div>' +
     '<div class="n5_htmk"><a href="https://bhagq.4yl7j.com/viewthread.php?tid=202">乙</a><img file="http://127.0.0.1:8765/i/8899"></div>' +
@@ -36,6 +41,20 @@ window.runTest = async (name) => {
     '<div class="n5_htmk"><a href="https://bhagq.4yl7j.com/viewthread.php?tid=102">乙</a></div>' +
     '<div class="n5_htmk"><a href="https://bhagq.4yl7j.com/viewthread.php?tid=103">丙</a></div>' +
     '</body></html>';
+  // 移动版详情页模板（站点按 UA 返回触屏模板）：没有 .t_f / .pcb，正文图在 .plc 下的 .orange 里。
+  // 真机实测 3805180：正文图就是这个结构，旧选择器（.t_f/.pcb/.message img）命中 0 张。
+  // 注意 .orange 故意放在 .message 之外——真机上 .message 里没有 img，放在里面就测不出这个 bug 了
+  const MOBILE_DETAIL_HTML = '<html><body>'
+    + '<div class="plc"><div class="authi"><img src="/uc_server/data/avatar/000/45/97/46_avatar_small.jpg"></div>'
+    + '<div class="message">纯文本回复</div><div class="orange"><img src="' + IMG + '?m1"></div></div>'
+    + '<div class="plc"><div class="authi"><img src="/static/image/common/settop.png"></div>'
+    + '<div class="message">置顶回复</div><div class="orange"><img src="' + IMG + '?m2"></div></div>'
+    + '</body></html>';
+  // 只有头像、正文无图（真机上这类帖子应保持"无缩略图"，不能被头像冒充）
+  const MOBILE_DETAIL_NOIMG = '<html><body>'
+    + '<div class="plc"><div class="authi"><img src="/uc_server/data/avatar/000/61/28/04_avatar_small.jpg"></div>'
+    + '<div class="message">纯文本回复</div></div>'
+    + '</body></html>';
   const DETAIL_HTML = '<html><body><div class="pcb"><div class="t_f">' +
     '<img file="' + IMG + '"><img file="' + IMG + '?b=2">' +
     '</div></div></body></html>';
@@ -209,6 +228,25 @@ window.runTest = async (name) => {
         ok('截断坏址帖经回捞后也有缩略图', !!d.querySelector('#normalthread_203 .sehua-thumb img'));
       }
     },
+    // 移动版详情页回捞：站点按 UA 返回触屏模板（无 .t_f/.pcb），正文图在 .plc 下的 .orange 里。
+  // 这条路径是 11 次提交里唯一"罐装页测不出、真机才暴露"的 bug：旧选择器在移动版模板上命中 0 张，
+  // 于是回捞返回 [] → 标记已查过 → 该帖永远没有缩略图（真机 fid=95 的 3805180 就是这样）
+    'sehua-mobile-detail': {
+      src: SRC_SEHUA, wait: 9000, pillId: 'sehua-progress',
+      gm: [
+        { re: /forum-\d+-\d+\.html/, html: MOBILE_CARD_LIST },
+        { re: /tid=301/, html: MOBILE_DETAIL_HTML },
+        { re: /tid=302/, html: MOBILE_DETAIL_NOIMG }
+      ],
+      assert: ({ ok, d, calls }) => {
+        const i301 = d.querySelector('#normalthread_301 .sehua-thumb img');
+        const i302 = d.querySelector('#normalthread_302 .sehua-thumb img');
+        ok('两者都走了详情页回捞', calls.some(u => /tid=301/.test(u)) && calls.some(u => /tid=302/.test(u)));
+        ok('移动版详情页（.plc/.orange）能抽到正文图', !!i301 && /m1|m2/.test(i301.getAttribute('src') || ''));
+        ok('抽到的是正文图不是头像/图标', !!i301 && !/uc_server|static\/image/.test(i301.getAttribute('src') || ''));
+        ok('正文确实无图的帖子不注入缩略图（头像不当图）', !i302);
+      }
+    },
     'sehua-detail': {
       src: SRC_SEHUA, wait: 4000, pillId: 'sehua-progress', watchPill: true,
       assert: ({ ok, d, pillLog }) => {
@@ -311,7 +349,7 @@ window.runTest = async (name) => {
       ],
       assert: ({ ok, d, calls }) => {
         const total = d.querySelectorAll('.sehua-thumb img').length;
-        ok('哨兵占位', d.documentElement.getAttribute('data-sehua') === '5.18');
+        ok('哨兵占位', d.documentElement.getAttribute('data-sehua') === '5.19');
         ok('双跑第二次被哨兵拦截', calls.length === 3);
         ok('GM 共 3 次（1 映射 + 2 回捞，无重复请求）', calls.length === 3 && calls.some(u => /tid=102/.test(u)) && calls.some(u => /tid=107/.test(u)));
         ok('双跑不重复注入（仍 6 张）', total === 6);
