@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      5.13
+// @version      5.14
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（横竖版按原比例、竖图最高 4:3 垂直居中裁切、每行最多 5 张、右上角图片总数角标；打开即全部加载，宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片加载队列对齐移动端节奏（4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 搜索繁忙自动重试；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
@@ -16,8 +16,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '5.13') return;
-  document.documentElement.setAttribute('data-sehua', '5.13');
+  if (document.documentElement.getAttribute('data-sehua') === '5.14') return;
+  document.documentElement.setAttribute('data-sehua', '5.14');
 
   // ============================ 可调参数 ============================
 
@@ -65,7 +65,8 @@
   const IMG_START_PER_SEC = 4;
   const IMG_TOKEN_CAP = 6;
 
-  // 单张图最多占用配额多久再兜底释放（防图床黑洞挂起占满并发槽）
+  // 单张图最多占用池内并发/令牌配额多久就释放（防图床黑洞挂起占满并发槽，挡住后面的图）。
+  // 只释放配额，不判定成败：之后图迟到落地照常补结算，永不落地则一直显示"等待中"等用户介入
   const IMG_HOLD_TIMEOUT = 10000;
 
   // 队列模式开关状态的 localStorage 键名（'0'=关闭，恢复旧的一次性全量加载）
@@ -192,7 +193,8 @@
   // 让一张图计入胶囊并开始加载：建节点时立即计数（分母一次定型），
   // 队列模式走加载池（对齐移动端节奏），关闭队列则立即发请求（旧行为）；
   // url 为 null 表示图已由站点直出真址、脚本只接管计数与结算（不改 src，避免重发请求）
-  // load/error/超时各结算一次（超时兜底，防黑洞图卡住分母）
+  // 结算路径：load/error 正常结算；超时只释放池配额并转入"等待中"，等图迟到落地再补结算——
+  // 没有"超时两次判失败"的兜底，黑洞图会一直显示等待中，由用户刷新介入
   function trackImage(img, url) {
     if (img.dataset.watched) return;   // 同一节点只计一次
     img.dataset.watched = '1';
@@ -305,7 +307,7 @@
   // 不感知图床、不做请求调度：浏览器挂起的请求就如实显示 x/y
 
   const pill = {
-    total: 0, settled: 0, failed: 0, undecided: 0, el: null, timer: null, undecidedTimer: null,
+    total: 0, settled: 0, failed: 0, undecided: 0, el: null, timer: null,
 
     add(n) {
       this.total += n;
@@ -316,16 +318,12 @@
 
     settle(failed) { this.settled++; if (failed) this.failed++; this.render(); },
 
-    // 超时只释放配额，图仍在等待响应——记为"未决"，不算失败（失败只认明确的 error：404/拒绝/解码失败）：
-    // 胶囊不算完成、不淡出，文案显示"N 张等待中"；黑洞图由兜底计时器统一结案
+    // 超时只释放池配额，图仍在等待响应——记为"未决"，不算失败（失败只认明确的 error：404/拒绝/解码失败）：
+    // 胶囊不算完成、不淡出，文案显示"N 张等待中"，一直等到图真正落地或用户介入（刷新）。
+    // 不做"超时两次就判失败"的兜底——那会制造 settled 越界、迟到误清计时器、宽限不顺延三类 bug，
+    // 而且把"还在等"谎报成"失败了"。宁可让胶囊一直挂着等用户处理。
     markUndecided() {
       this.undecided++;
-      if (!this.undecidedTimer) this.undecidedTimer = setTimeout(() => {
-        this.undecidedTimer = null;
-        if (!this.undecided) return;
-        this.settled += this.undecided; this.failed += this.undecided; this.undecided = 0;   // 永不回调 = 确认失败
-        this.render();
-      }, IMG_HOLD_TIMEOUT * 2);
       this.render();
     },
 
@@ -334,9 +332,6 @@
       if (this.undecided > 0) this.undecided--;
       this.settled++;
       if (!lateOk) this.failed++;
-      // 只在解除最后一张未决图时才清兜底计时器：仍有同伴未决时若清掉，那张图一旦是黑洞图，
-      // undecided 就永久泄漏，done = settled>=total && undecided===0 永远为假，胶囊钉在屏幕上不淡出
-      if (this.undecided === 0) { clearTimeout(this.undecidedTimer); this.undecidedTimer = null; }
       this.render();
     },
 

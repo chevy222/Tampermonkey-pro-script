@@ -20,14 +20,13 @@ python test/server.py
 | `/thread-101-1-1.html` | 色花堂详情页（占位图） |
 | `/thread-102-1-1.html` | 色花堂详情页（站点已直出真址） |
 | `/thread-104-1-1.html` | 色花堂详情页（1 快 + 1 张 11.2 秒慢图） |
-| `/thread-106-1-1.html` | 色花堂详情页（1 张 11.2 秒慢图 + 1 张永不回调的黑洞图） |
-| `/thread.php?fid=15&search=img&page=1` | 2048 列表页 |
+| `/thread-106-1-1.html` | 色花堂详情页（1 张 11.2 秒慢图 + 1 张永不回调的黑洞图） || `/thread.php?fid=15&search=img&page=1` | 2048 列表页 |
 | `/read.php?tid=1` | 2048 详情页（占位图） |
 | `/read-slow.php` | 2048 详情页（1 快 + 1 张 11.2 秒慢图） |
 | `/read-slow2.php` | 2048 详情页（1 快 + 1 张 13.2 秒慢图） |
 
 假图床路由：`/img.gif`、`/slow.gif`（0.4s）、`/slow11.gif`（11.2s）、`/slow13.gif`（13.2s）、
-`/never.gif`（挂 120 秒，模拟连接后永不回调的黑洞图）、`/wide.svg`、`/tall.svg`。
+`/never.gif`（挂 60 秒，模拟连接后永不回调的黑洞图）、`/wide.svg`、`/tall.svg`。
 
 ## 跑断言
 
@@ -51,7 +50,7 @@ python test/server.py
 `t2048-queue-off`、`t2048-late-success`、`t2048-batch-refresh`
 
 慢图场景（`*-late-success` / `batch-refresh` / `blackhole-peer`）需要等 13-36 秒，不是卡住了。
-`sehua-blackhole-peer` 最慢：要等黑洞图跨过 30 秒兜底时刻被结案。
+`sehua-blackhole-peer` 最慢：要确认黑洞图跨过 30 秒仍不被判死、胶囊一直挂着。
 
 ## 维护提示
 

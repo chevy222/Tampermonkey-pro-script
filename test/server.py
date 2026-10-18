@@ -192,10 +192,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             time.sleep(13.2)
             return self._send(IMG_BYTES, 'image/gif')
         elif path == '/never.gif':
-            # 黑洞图：连接建立后永不返回数据（不 load 也不 error）。用于验证兜底计时器
-            # 是否被同伴图迟到落地误清（P0-2）。挂 120 秒，足够覆盖整个测试窗口。
+            # 黑洞图：连接建立后永不返回数据（不 load 也不 error）。用于验证"没有兜底判死"——
+            # 它应一直显示在"等待中"，由用户刷新介入。挂 60 秒，覆盖整个测试窗口。
             import time
-            time.sleep(120)
+            time.sleep(60)
             return self._send(IMG_BYTES, 'image/gif')
         elif path == '/harness.js':
             body = open(os.path.join(HERE, 'harness.js'), encoding='utf-8').read().encode('utf-8')

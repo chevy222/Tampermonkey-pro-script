@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048
 // @namespace    https://fby.hfz300.com/
-// @version      5.1
+// @version      5.2
 // @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；去懒加载——列表原生 lazy 与详情页占位图（data-original）一律立即加载，防抖观察者兜底站点改图；图片加载队列（10 张/秒、在途≤10、首屏突发 10），列表页"搜索"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
@@ -37,8 +37,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-t2048') === '5.1') return;
-  document.documentElement.setAttribute('data-t2048', '5.1');
+  if (document.documentElement.getAttribute('data-t2048') === '5.2') return;
+  document.documentElement.setAttribute('data-t2048', '5.2');
 
   // ============================ 样式 ============================
 
@@ -187,7 +187,7 @@
   // 只统计脚本触发加载的图，原生 load/error 即结算，全部完成后延迟淡出
 
   const pill = {
-    total: 0, settled: 0, failed: 0, undecided: 0, el: null, timer: null, undecidedTimer: null,
+    total: 0, settled: 0, failed: 0, undecided: 0, el: null, timer: null,
 
     add(n) {
       this.total += n;
@@ -198,15 +198,12 @@
 
     settle(failed) { this.settled++; if (failed) this.failed++; this.render(); },
 
-    // 超时只释放配额，图仍在等响应——记为"未决"，不算失败（失败只认明确的 error）；胶囊不淡出直到落地或兜底
+    // 超时只释放池配额，图仍在等响应——记为"未决"，不算失败（失败只认明确的 error）：
+    // 胶囊不淡出，文案显示"N 张等待中"，一直等到图真正落地或用户介入（刷新）。
+    // 不做"超时两次就判失败"的兜底——那会制造 settled 越界、迟到误清计时器、宽限不顺延三类 bug，
+    // 而且把"还在等"谎报成"失败了"。宁可让胶囊一直挂着等用户处理。
     markUndecided() {
       this.undecided++;
-      if (!this.undecidedTimer) this.undecidedTimer = setTimeout(() => {
-        this.undecidedTimer = null;
-        if (!this.undecided) return;
-        this.settled += this.undecided; this.failed += this.undecided; this.undecided = 0;
-        this.render();
-      }, IMG_HOLD_TIMEOUT * 2);
       this.render();
     },
 
@@ -215,9 +212,6 @@
       if (this.undecided > 0) this.undecided--;
       this.settled++;
       if (!lateOk) this.failed++;
-      // 只在解除最后一张未决图时才清兜底计时器：仍有同伴未决时若清掉，那张图一旦是黑洞图，
-      // undecided 就永久泄漏，done 永远为假，胶囊钉在屏幕上不淡出
-      if (this.undecided === 0) { clearTimeout(this.undecidedTimer); this.undecidedTimer = null; }
       this.render();
     },
 
