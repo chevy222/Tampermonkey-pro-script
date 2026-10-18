@@ -4,8 +4,8 @@
 // @version      5.19
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（默认 4:3 横框，竖图加载完成后切 3:4 竖框，均居中裁切不拉伸；每行最多 5 张；右上角图片总数角标；宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片按队列节奏加载（默认 4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 搜索繁忙自动重试；右下角加载进度胶囊。
 // @author       Chevy Yang
-// @match        https://bhagq.4yl7j.com/*
-// @connect      bhagq.4yl7j.com
+// @match        https://xtsa.wqfj3.com/*
+// @connect      xtsa.wqfj3.com
 // @grant        GM_xmlhttpRequest
 // @noframes
 // ==/UserScript==

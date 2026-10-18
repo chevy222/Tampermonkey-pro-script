@@ -4,7 +4,7 @@
 // @version      2.0
 // @description  探花BT：列表页居中显示详情页预览大图 + 列表/详情页去广告
 // @author       Chevy Yang
-// @match        https://sdy.685886.xyz/*
+// @match        https://dja.532232.com/*
 // @grant        GM_xmlhttpRequest
 // @connect      *
 // @run-at       document-idle

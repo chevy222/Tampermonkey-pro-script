@@ -3,6 +3,7 @@
 // @namespace    https://sis001.com/
 // @version      1.2
 // @description  在 sis001.com 全站列表页中从详情页抓取缩略图直接显示
+// @author       Chevy Yang
 // @match        https://www.sis001.com/forum/forum-*.html
 // @match        https://www.sis001.com/forum/forumdisplay.php*
 // @run-at       document-end
