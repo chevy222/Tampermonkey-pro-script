@@ -133,6 +133,29 @@ window.runTest = async (name) => {
         ok('迟到成功补结算（最终全成功）', !!last && /^缩略图：成功 2 · 共 2$/.test(last.text));
       }
     },
+    // P0-2 回归：同伴图迟到落地时不能清掉黑洞图的兜底计时器，否则 undecided 永久泄漏、胶囊永不淡出。
+    // 用"一张 11.2s 迟到成功 + 一张永不回调的黑洞图"构造同伴场景
+    'sehua-blackhole-peer': {
+      src: SRC_SEHUA, wait: 36000, pillId: 'sehua-progress', watchPill: true,
+      assert: ({ ok, d, pillLog }) => {
+        const parse = t => {
+          if (!/^缩略图：成功 \d+/.test(t)) return null;
+          const v = { ok: +(/成功 (\d+)/.exec(t)[1]), wait: 0, fail: 0, total: +(/· 共 (\d+)/.exec(t)[1]) };
+          const w = /· 等待 (\d+)/.exec(t); if (w) v.wait = +w[1];
+          const f = /· 失败 (\d+)/.exec(t); if (f) v.fail = +f[1];
+          return v;
+        };
+        const arr = pillLog.map(p => parse(p.text)).filter(Boolean);
+        // 10s 两张都超时 → 等待 2；11.2s 迟到成功落地 → 等待 1、成功 1
+        ok('两张图超时后胶囊显示等待 2', arr.some(a => a.wait === 2 && a.total === 2));
+        ok('同伴迟到落地后仍有 1 张等待', arr.some(a => a.wait === 1 && a.ok === 1 && a.total === 2));
+        // 关键：兜底计时器没被迟到落地清掉，黑洞图在 30s 被结案 → 胶囊最终淡出
+        ok('黑洞图最终被兜底结案（等待归零）', arr.some(a => a.wait === 0 && a.fail === 1));
+        ok('胶囊最终淡出/移除（不永久停留）', pillLog.some(p => p.op === '0') || !d.getElementById('sehua-progress'));
+        const last = arr[arr.length - 1];
+        ok('终态数字自洽（成功+失败 = 共）', !!last && last.ok + last.fail === last.total);
+      }
+    },
     'sehua-detail': {
       src: SRC_SEHUA, wait: 4000, pillId: 'sehua-progress', watchPill: true,
       assert: ({ ok, d, pillLog }) => {
@@ -235,7 +258,7 @@ window.runTest = async (name) => {
       ],
       assert: ({ ok, d, calls }) => {
         const total = d.querySelectorAll('.sehua-thumb img').length;
-        ok('哨兵占位', d.documentElement.getAttribute('data-sehua') === '5.12');
+        ok('哨兵占位', d.documentElement.getAttribute('data-sehua') === '5.13');
         ok('双跑第二次被哨兵拦截', calls.length === 3);
         ok('GM 共 3 次（1 映射 + 2 回捞，无重复请求）', calls.length === 3 && calls.some(u => /tid=102/.test(u)) && calls.some(u => /tid=107/.test(u)));
         ok('双跑不重复注入（仍 6 张）', total === 6);
@@ -448,7 +471,7 @@ window.runTest = async (name) => {
         ok('列表页锚点补 target=_blank', d.querySelector('#threadlist a').target === '_blank');
         ok('eager 先于 src 赋值', srcLog.every(e => e[0] === 'eager'));
         ok('胶囊完成 成功 2 · 共 2（无失败无等待时不显示）', pillLog.some(p => /^缩略图：成功 2 · 共 2$/.test(p.text)));
-        ok('哨兵已占位', d.documentElement.getAttribute('data-t2048') === '5.0');
+        ok('哨兵已占位', d.documentElement.getAttribute('data-t2048') === '5.1');
         const styleCount = [...d.querySelectorAll('style')].filter(s => s.textContent.indexOf('thumb-progress') !== -1).length;
         ok('双跑只注入一份样式', styleCount === 1);
       }

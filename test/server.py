@@ -53,6 +53,15 @@ LATE_SUCCESS_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>t
 <ignore_js_op><img class="zoom" file="__SLOW__" src="thumb-ing.gif"></ignore_js_op>
 </div></div></div></div></body></html>""".replace('__IMG__', IMG_URL).replace('__SLOW__', IMG_URL.replace('/img.gif', '/slow11.gif'))
 
+# P0-2 回归页：一张 11.2 秒迟到成功 + 一张永不回调的黑洞图。
+# 迟到成功落地时若清掉了兜底计时器，黑洞图的 undecided 会永久泄漏、胶囊永不淡出。
+BLACKHOLE_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>thread</title></head><body>
+<div class="wp"><div id="ct"><div id="postlist">
+<div class="pcb"><div class="t_f">
+<ignore_js_op><img class="zoom" file="__SLOW__" src="thumb-ing.gif"></ignore_js_op>
+<ignore_js_op><img class="zoom" file="__NEVER__" src="thumb-ing.gif"></ignore_js_op>
+</div></div></div></div></body></html>""".replace('__SLOW__', IMG_URL.replace('/img.gif', '/slow11.gif')).replace('__NEVER__', IMG_URL.replace('/img.gif', '/never.gif'))
+
 READ_SLOW2_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>read</title></head><body>
 <div id="postlist">
 <img src="thumb-ing.gif" data-original="__IMG__?fastb">
@@ -66,6 +75,13 @@ READ_SLOW_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>read
 <img src="thumb-ing.gif" data-original="__SLOW__">
 </div>
 </body></html>""".replace('__IMG__', IMG_URL).replace('__SLOW__', IMG_URL.replace('/img.gif', '/slow11.gif'))
+
+READ_BLACKHOLE_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>read</title></head><body>
+<div id="postlist">
+<img src="thumb-ing.gif" data-original="__SLOW11__">
+<img src="thumb-ing.gif" data-original="__NEVER__">
+</div>
+</body></html>""".replace('__SLOW11__', IMG_URL.replace('/img.gif', '/slow11.gif')).replace('__NEVER__', IMG_URL.replace('/img.gif', '/never.gif'))
 
 DETAIL_PRELOADED_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>thread</title></head><body><div class="wp"><div id="ct"><div id="postlist">
 <div class="pcb"><div class="t_f">
@@ -137,8 +153,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             html = DETAIL_PRELOADED_PAGE
         elif path == '/thread-104-1-1.html':
             html = LATE_SUCCESS_PAGE
+        elif path == '/thread-106-1-1.html':
+            html = BLACKHOLE_PAGE
         elif path == '/read-slow.php':
             html = READ_SLOW_PAGE
+        elif path == '/read-blackhole.php':
+            html = READ_BLACKHOLE_PAGE
         elif path == '/read-slow2.php':
             html = READ_SLOW2_PAGE
         elif path == '/thread.php':
@@ -170,6 +190,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # 更迟的成功：跨过"10s 超时 + 2.5s 淡出"之后才回来，验证计数与可见性解耦
             import time
             time.sleep(13.2)
+            return self._send(IMG_BYTES, 'image/gif')
+        elif path == '/never.gif':
+            # 黑洞图：连接建立后永不返回数据（不 load 也不 error）。用于验证兜底计时器
+            # 是否被同伴图迟到落地误清（P0-2）。挂 120 秒，足够覆盖整个测试窗口。
+            import time
+            time.sleep(120)
             return self._send(IMG_BYTES, 'image/gif')
         elif path == '/harness.js':
             body = open(os.path.join(HERE, 'harness.js'), encoding='utf-8').read().encode('utf-8')

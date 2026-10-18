@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048
 // @namespace    https://fby.hfz300.com/
-// @version      5.0
+// @version      5.1
 // @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；去懒加载——列表原生 lazy 与详情页占位图（data-original）一律立即加载，防抖观察者兜底站点改图；图片加载队列（10 张/秒、在途≤10、首屏突发 10），列表页"搜索"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
@@ -37,8 +37,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-t2048') === '5.0') return;
-  document.documentElement.setAttribute('data-t2048', '5.0');
+  if (document.documentElement.getAttribute('data-t2048') === '5.1') return;
+  document.documentElement.setAttribute('data-t2048', '5.1');
 
   // ============================ 样式 ============================
 
@@ -212,10 +212,12 @@
 
     // 未决图迟到落地：补结算。lateOk=true 迟到成功（不计失败），false 迟到明确失败
     resolveUndecided(lateOk) {
-      clearTimeout(this.undecidedTimer); this.undecidedTimer = null;
       if (this.undecided > 0) this.undecided--;
       this.settled++;
       if (!lateOk) this.failed++;
+      // 只在解除最后一张未决图时才清兜底计时器：仍有同伴未决时若清掉，那张图一旦是黑洞图，
+      // undecided 就永久泄漏，done 永远为假，胶囊钉在屏幕上不淡出
+      if (this.undecided === 0) { clearTimeout(this.undecidedTimer); this.undecidedTimer = null; }
       this.render();
     },
 
