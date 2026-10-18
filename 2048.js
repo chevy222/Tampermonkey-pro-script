@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048
 // @namespace    https://fby.hfz300.com/
-// @version      5.2
+// @version      5.3
 // @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；去懒加载——列表原生 lazy 与详情页占位图（data-original）一律立即加载，防抖观察者兜底站点改图；图片加载队列（10 张/秒、在途≤10、首屏突发 10），列表页"搜索"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
@@ -37,7 +37,7 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-t2048') === '5.2') return;
+  if (document.documentElement.getAttribute('data-t2048') === '5.3') return;
   document.documentElement.setAttribute('data-t2048', '5.2');
 
   // ============================ 样式 ============================
@@ -110,23 +110,31 @@
     if (img.dataset.watched) return;   // 同一节点只计一次
     img.dataset.watched = '1';
     pill.add(1);
+    // settledHere = 这张图的最终状态已确定（成功或明确失败）。守卫放在分支之前，
+    // 保证 load 和 error 各来一次也只结算一次（{once:true} 只管单个监听器自删，
+    // 挡不住 load 成功后 src 又被改成坏址导致的第二次事件）。
+    // 超时路径不置位——那时只是转入"等待中"，迟到落地还要靠 resolveUndecided 补结算
     let settledHere = false, timedOut = false;
-    const settle = failed => { if (!settledHere) { settledHere = true; pill.settle(failed); } };
+    const settle = failed => { pill.settle(failed); };
     const start = poolDone => {
       let released = false;
       const release = () => { if (released) return; released = true; clearTimeout(to); if (poolDone) poolDone(); };
       const to = setTimeout(() => { timedOut = true; pill.markUndecided(); release(); }, IMG_HOLD_TIMEOUT);
       img.addEventListener('load', () => {
-        if (timedOut) { timedOut = 'resolved'; pill.resolveUndecided(true); } else settle(false);   // 迟到成功：补结算，不计失败
+        if (settledHere) { release(); return; }
+        settledHere = true;
+        if (timedOut) pill.resolveUndecided(true); else settle(false);   // 迟到成功：补结算，不计失败
         release();
       }, { once: true });
       img.addEventListener('error', () => {
-        if (timedOut) { timedOut = 'resolved'; pill.resolveUndecided(false); } else settle(true);  // 迟到明确失败：补结算 + 计失败
+        if (settledHere) { release(); return; }
+        settledHere = true;
+        if (timedOut) pill.resolveUndecided(false); else settle(true);   // 迟到明确失败：补结算 + 计失败
         release();
       }, { once: true });
       action();
       // 触发后若图已完成（缓存命中/原本就加载完了），load 事件不会再触发，需同步结算
-      if (img.complete) { if (img.naturalWidth > 0) settle(false); else settle(true); release(); }
+      if (img.complete) { settledHere = true; if (img.naturalWidth > 0) settle(false); else settle(true); release(); }
     };
     if (queueEnabled) imgLoader.load(start); else start(null);
   }

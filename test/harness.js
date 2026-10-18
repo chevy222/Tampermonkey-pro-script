@@ -6,8 +6,9 @@ window.runTest = async (name) => {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const GIF = 'data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==';
   const IMG = 'http://127.0.0.1:8765/img.gif';
-  const SRC_SEHUA = await (await fetch('/sehua.js')).text();
-  const SRC_T2048 = await (await fetch('/t2048.js')).text();
+  // 加时间戳防浏览器缓存：否则"回滚代码跑旧断言"这类验证会拿到缓存里的新源码，结论全假
+  const SRC_SEHUA = await (await fetch('/sehua.js?t=' + Date.now())).text();
+  const SRC_T2048 = await (await fetch('/t2048.js?t=' + Date.now())).text();
 
   // ---- 罐装 XHR 响应（色花堂）----
   const MOBILE_LIST = '<html><body>' +
@@ -157,6 +158,34 @@ window.runTest = async (name) => {
         ok('账目自洽（成功+失败+等待 = 共）', !!last && last.ok + last.fail + last.wait === last.total);
       }
     },
+    // P1-1 回归：迟到成功之后 src 又被改成坏址（站点 lazyload/其他脚本重复赋值），error 不应导致二次结算。
+    // 时机选在胶囊淡出前（迟到成功后 2.5 秒内）——修复前会 render 出"成功 2 · 失败 1 · 共 2"这种加法不成立的文案
+    'sehua-late-then-error': {
+      src: SRC_SEHUA, wait: 12500, pillId: 'sehua-progress', watchPill: true,
+      assert: async ({ ok, d, sleep }) => {
+        const parse = t => {
+          if (!/^缩略图：成功 \d+/.test(t)) return null;
+          const v = { ok: +(/成功 (\d+)/.exec(t)[1]), wait: 0, fail: 0, total: +(/· 共 (\d+)/.exec(t)[1]) };
+          const w = /· 等待 (\d+)/.exec(t); if (w) v.wait = +w[1];
+          const f = /· 失败 (\d+)/.exec(t); if (f) v.fail = +f[1];
+          return v;
+        };
+        const pill = () => document.getElementById('sehua-progress');
+        // 12.5s：慢图（11.2s）已迟到成功，胶囊还在（淡出要在 13.7s）
+        const before = pill() && pill().textContent;
+        ok('迟到成功后胶囊为全成功', !!before && /^缩略图：成功 2 · 共 2$/.test(before));
+        // 把慢图的 src 改成坏址：load 已完成，这次会触发 error
+        const imgs = [...d.querySelectorAll('#postlist img')];
+        const slow = imgs[imgs.length - 1];
+        slow.src = 'http://127.0.0.1:8765/nonexistent-404.gif';
+        await sleep(1200);
+        const after = pill() && pill().textContent;
+        // 守卫生效：文案不变。守卫失效时 settled 越界，会显示"成功 2 · 失败 1 · 共 2"（加法不成立）
+        ok('迟到成功后再来 error 不重复结算', !!after && after === before);
+        const v = parse(after || '');
+        ok('账目自洽（成功+失败+等待 = 共）', !!v && v.ok + v.fail + v.wait === v.total);
+      }
+    },
     'sehua-detail': {
       src: SRC_SEHUA, wait: 4000, pillId: 'sehua-progress', watchPill: true,
       assert: ({ ok, d, pillLog }) => {
@@ -259,7 +288,7 @@ window.runTest = async (name) => {
       ],
       assert: ({ ok, d, calls }) => {
         const total = d.querySelectorAll('.sehua-thumb img').length;
-        ok('哨兵占位', d.documentElement.getAttribute('data-sehua') === '5.14');
+        ok('哨兵占位', d.documentElement.getAttribute('data-sehua') === '5.15');
         ok('双跑第二次被哨兵拦截', calls.length === 3);
         ok('GM 共 3 次（1 映射 + 2 回捞，无重复请求）', calls.length === 3 && calls.some(u => /tid=102/.test(u)) && calls.some(u => /tid=107/.test(u)));
         ok('双跑不重复注入（仍 6 张）', total === 6);
@@ -472,7 +501,7 @@ window.runTest = async (name) => {
         ok('列表页锚点补 target=_blank', d.querySelector('#threadlist a').target === '_blank');
         ok('eager 先于 src 赋值', srcLog.every(e => e[0] === 'eager'));
         ok('胶囊完成 成功 2 · 共 2（无失败无等待时不显示）', pillLog.some(p => /^缩略图：成功 2 · 共 2$/.test(p.text)));
-        ok('哨兵已占位', d.documentElement.getAttribute('data-t2048') === '5.2');
+        ok('哨兵已占位', d.documentElement.getAttribute('data-t2048') === '5.3');
         const styleCount = [...d.querySelectorAll('style')].filter(s => s.textContent.indexOf('thumb-progress') !== -1).length;
         ok('双跑只注入一份样式', styleCount === 1);
       }
