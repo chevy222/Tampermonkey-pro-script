@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         2048
 // @namespace    https://fby.hfz300.com/
-// @version      5.3
-// @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；去懒加载——列表原生 lazy 与详情页占位图（data-original）一律立即加载，防抖观察者兜底站点改图；图片加载队列（10 张/秒、在途≤10、首屏突发 10），列表页"搜索"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；右下角加载进度胶囊。
+// @version      5.4
+// @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；去懒加载——列表原生 lazy 与详情页占位图（data-original/data-src）一律立即加载，防抖观察者只接管 AJAX 新插入的图（不监听属性变更）；图片加载队列（10 张/秒、在途≤10、首屏突发 10），列表页"搜索"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
 // @run-at       document-idle
@@ -37,8 +37,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-t2048') === '5.3') return;
-  document.documentElement.setAttribute('data-t2048', '5.3');
+  if (document.documentElement.getAttribute('data-t2048') === '5.4') return;
+  document.documentElement.setAttribute('data-t2048', '5.4');
 
   // ============================ 样式 ============================
 
@@ -215,9 +215,12 @@
       this.render();
     },
 
-    // 未决图迟到落地：补结算。lateOk=true 迟到成功（不计失败），false 迟到明确失败
+    // 未决图迟到落地：补结算。lateOk=true 迟到成功（不计失败），false 迟到明确失败。
+    // 账上没有未决就直接返回：正常流程走不到这里，真走到了说明不变式已破（配对丢了），
+    // 这时再多记一个 settled 会让"成功+失败+等待"超过"共"，宁可不记账也不谎报
     resolveUndecided(lateOk) {
-      if (this.undecided > 0) this.undecided--;
+      if (!this.undecided) return;
+      this.undecided--;
       this.settled++;
       if (!lateOk) this.failed++;
       this.render();

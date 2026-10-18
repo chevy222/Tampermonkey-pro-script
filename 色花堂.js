@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      5.16
-// @description  色花堂：去广告；PC 列表页注入移动版缩略图（横竖版按原比例、竖图最高 4:3 垂直居中裁切、每行最多 5 张、右上角图片总数角标；打开即全部加载，宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片加载队列对齐移动端节奏（4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 搜索繁忙自动重试；右下角加载进度胶囊。
+// @version      5.17
+// @description  色花堂：去广告；PC 列表页注入移动版缩略图（默认 4:3 横框，竖图加载完成后切 3:4 竖框，均居中裁切不拉伸；每行最多 5 张；右上角图片总数角标；宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片按队列节奏加载（默认 4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 搜索繁忙自动重试；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bhagq.4yl7j.com/*
 // @connect      bhagq.4yl7j.com
@@ -16,8 +16,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '5.16') return;
-  document.documentElement.setAttribute('data-sehua', '5.16');
+  if (document.documentElement.getAttribute('data-sehua') === '5.17') return;
+  document.documentElement.setAttribute('data-sehua', '5.17');
 
   // ============================ 可调参数 ============================
 
@@ -36,12 +36,12 @@
   // 从详情页取图时单帖最多取几张
   const MAX_DETAIL_IMGS = 5;
 
-  // 移动版映射被拦后的重试次数与退避间隔
-  const MOBILE_RETRY_TIMES = 2;
+  // 移动版映射的请求次数上限（含首次，不是"重试几次"）与退避间隔
+  const MOBILE_MAX_TRIES = 2;
   const MOBILE_RETRY_DELAY = 1500;
 
-  // 详情页请求被拦后的退避重试
-  const DETAIL_RETRY_TIMES = 2;
+  // 详情页取图的请求次数上限（含首次）与退避间隔
+  const DETAIL_MAX_TRIES = 2;
   const DETAIL_RETRY_DELAY = 2000;
 
   // 缩略图之间的间距
@@ -76,10 +76,11 @@
 
   // 站内装饰图特征：静态图标、用户头像、占位图；另把"无图片扩展名"的地址也视为无效——
   // 部分技术/资源帖的移动版缩略图是 data/attachment/h 这类截断路径，取到也加载不出来，
-  // 判无效后该帖会进 fallback，从详情页回捞真图
+  // 判无效后该帖会进 fallback，从详情页回捞真图。
+  // 扩展名白名单要把图床实际会发的格式都列上，漏一个就等于把真图误判成占位（白跑一次回捞）
   const isPlaceholder = url => {
     if (['static/image', 'uc_server', 'none.gif', 'thumb-ing'].some(m => url.includes(m))) return true;
-    try { return !/\.(jpe?g|png|gif|webp|bmp|svg)$/i.test(new URL(url, location.href).pathname); } catch (e) { return true; }
+    try { return !/\.(jpe?g|png|gif|webp|bmp|svg|avif|jfif|heic|heif|apng)$/i.test(new URL(url, location.href).pathname); } catch (e) { return true; }
   };
 
   // val 为 null 时 new URL 会把它串成 "null" 并返回合法假地址，必须先挡
@@ -94,6 +95,15 @@
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const addStyle = css => document.head.insertAdjacentHTML('beforeend', `<style>${css}</style>`);
+
+  // sessionStorage 在"禁用站点数据"、隐私模式等情况下，连 getItem 都会抛 SecurityError。
+  // searchBusyRetry 是 onDomReady 的前置步骤，那里抛一次错就足以让缩略图、去广告、详情页全部停摆，
+  // 所以本脚本所有 sessionStorage 访问都走这里，不再直接碰原生对象
+  const ss = {
+    get: k => { try { return sessionStorage.getItem(k); } catch (e) { return null; } },
+    set: (k, v) => { try { sessionStorage.setItem(k, v); } catch (e) {} },
+    del: k => { try { sessionStorage.removeItem(k); } catch (e) {} }
+  };
 
   // ============================ 网络请求 ============================
 
@@ -128,7 +138,7 @@
 
   // 详情页抽图；null=被拦/超时（可重试），[]=帖子里没图（终态）
   const fetchDetailImages = tid => (async () => {
-    for (let i = 0; i < DETAIL_RETRY_TIMES; i++) {
+    for (let i = 0; i < DETAIL_MAX_TRIES; i++) {
       const r = await gmGet(`https://${location.hostname}/forum.php?mod=viewthread&tid=${tid}`, text => {
         const urls = [];
         new DOMParser().parseFromString(text, 'text/html').querySelectorAll('.t_f img, .pcb img, .message img').forEach(img => {
@@ -138,7 +148,7 @@
         return urls;
       });
       if (r) return r;
-      if (i < DETAIL_RETRY_TIMES - 1) await sleep(DETAIL_RETRY_DELAY);
+      if (i < DETAIL_MAX_TRIES - 1) await sleep(DETAIL_RETRY_DELAY);
     }
     return null;
   })();
@@ -335,9 +345,12 @@
       this.render();
     },
 
-    // 未决图迟到落地：补结算。lateOk=true 迟到成功（不计失败），false 迟到明确失败
+    // 未决图迟到落地：补结算。lateOk=true 迟到成功（不计失败），false 迟到明确失败。
+    // 账上没有未决就直接返回：正常流程走不到这里，真走到了说明不变式已破（配对丢了），
+    // 这时再多记一个 settled 会让"成功+失败+等待"超过"共"，宁可不记账也不谎报
     resolveUndecided(lateOk) {
-      if (this.undecided > 0) this.undecided--;
+      if (!this.undecided) return;
+      this.undecided--;
       this.settled++;
       if (!lateOk) this.failed++;
       this.render();
@@ -414,7 +427,7 @@
 
     // 移动版映射：仅被拦（null）才重试，空页不重试
     let r = null;
-    for (let i = 0; i < MOBILE_RETRY_TIMES && !r; i++) { if (i) await sleep(MOBILE_RETRY_DELAY); r = await fetchMobileThumbs(fid, m ? +m[2] : (+p.get('page') || 1)); }
+    for (let i = 0; i < MOBILE_MAX_TRIES && !r; i++) { if (i) await sleep(MOBILE_RETRY_DELAY); r = await fetchMobileThumbs(fid, m ? +m[2] : (+p.get('page') || 1)); }
     const map = r ? r.map : {}, fallback = r ? r.fallback : [], totals = r ? (r.totals || {}) : {};
 
     document.querySelectorAll('#threadlisttableid tr').forEach(tr => {
@@ -537,12 +550,12 @@
   // 只认"搜索繁忙"（瞬时繁忙，重试有意义）；"搜索过于频繁…120秒"是冷却，不碰。
   // 任何页面都先清零计数，避免旧计数跨页面叠加
   function searchBusyRetry() {
-    if (location.pathname.indexOf('/search.php') === -1) { sessionStorage.removeItem(BUSY_KEY); return false; }
+    if (location.pathname.indexOf('/search.php') === -1) { ss.del(BUSY_KEY); return false; }
     const box = document.getElementById('messagetext') || document.querySelector('.alert_error, .alert_info');
-    if (!box || box.textContent.indexOf('搜索繁忙') === -1) { sessionStorage.removeItem(BUSY_KEY); return false; }
-    const n = (+sessionStorage.getItem(BUSY_KEY) || 0) + 1;
-    if (n > MAX_BUSY_RETRY) { sessionStorage.removeItem(BUSY_KEY); return false; }
-    sessionStorage.setItem(BUSY_KEY, n);
+    if (!box || box.textContent.indexOf('搜索繁忙') === -1) { ss.del(BUSY_KEY); return false; }
+    const n = (+ss.get(BUSY_KEY) || 0) + 1;
+    if (n > MAX_BUSY_RETRY) { ss.del(BUSY_KEY); return false; }
+    ss.set(BUSY_KEY, n);
     const tip = document.body.appendChild(document.createElement('div'));
     tip.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,.8);color:#fff;padding:16px 24px;border-radius:8px;font-size:14px;z-index:99999;text-align:center;';
     let s = 4;

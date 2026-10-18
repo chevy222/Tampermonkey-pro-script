@@ -288,7 +288,7 @@ window.runTest = async (name) => {
       ],
       assert: ({ ok, d, calls }) => {
         const total = d.querySelectorAll('.sehua-thumb img').length;
-        ok('哨兵占位', d.documentElement.getAttribute('data-sehua') === '5.16');
+        ok('哨兵占位', d.documentElement.getAttribute('data-sehua') === '5.17');
         ok('双跑第二次被哨兵拦截', calls.length === 3);
         ok('GM 共 3 次（1 映射 + 2 回捞，无重复请求）', calls.length === 3 && calls.some(u => /tid=102/.test(u)) && calls.some(u => /tid=107/.test(u)));
         ok('双跑不重复注入（仍 6 张）', total === 6);
@@ -501,7 +501,7 @@ window.runTest = async (name) => {
         ok('列表页锚点补 target=_blank', d.querySelector('#threadlist a').target === '_blank');
         ok('eager 先于 src 赋值', srcLog.every(e => e[0] === 'eager'));
         ok('胶囊完成 成功 2 · 共 2（无失败无等待时不显示）', pillLog.some(p => /^缩略图：成功 2 · 共 2$/.test(p.text)));
-        ok('哨兵已占位', d.documentElement.getAttribute('data-t2048') === '5.3');
+        ok('哨兵已占位', d.documentElement.getAttribute('data-t2048') === '5.4');
         const styleCount = [...d.querySelectorAll('style')].filter(s => s.textContent.indexOf('thumb-progress') !== -1).length;
         ok('双跑只注入一份样式', styleCount === 1);
       }
