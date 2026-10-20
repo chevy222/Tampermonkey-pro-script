@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         探花
 // @namespace    http://thbt6.com/
-// @version      2.0
-// @description  探花BT：列表页居中显示详情页预览大图 + 列表/详情页去广告
+// @version      2.1
+// @description  探花BT：列表页居中显示详情页预览大图 + 分辨率徽章 + 一键复制磁力 + 列表/详情页去广告
 // @author       Chevy Yang
 // @match        https://dja.532232.com/*
 // @grant        GM_xmlhttpRequest
@@ -33,6 +33,10 @@
  *     .preview-grid > .capture-col（站点自己的预览图）
  *     P#magnet-link、下载/复制磁力按钮、.pagination-nav（上一篇/下一篇）
  *
+ *   复制磁力：站点 copyMagnet() 读的是 P#magnet-link 的文本（该 P 默认 display:none），
+ *   内容就是 __data__ 里的 "magnet" 字段，纯明文。列表页按同一条正则取，
+ *   不额外发请求（详情页 HTML 本来就在抓），也不需要进详情页。
+ *
  * 【预览图】
  *   地址：https://{domain_image}/capture/{picture_dir}/t4.jpg
  *   站点自己在 <picture> 里放了两条，但同一时刻只显示一条：
@@ -57,6 +61,9 @@
         // 在标题后显示 "1280x720" 分辨率徽章
         showResolutionBadge: true,
 
+        // 在分辨率徽章右边放"复制磁力"按钮（等同详情页的复制磁力）
+        showCopyButton: true,
+
         // 列表页与详情页都要清掉的广告块
         adSelectors: [
             '#hf-container',   // 顶部广告条（10 条外链图）
@@ -79,7 +86,9 @@
         loading: 'tht-loading',   // ⚠️ 别用 .preview-loading，站点自己的预览组件在用
         badge: 'tht-badge',
         empty: 'tht-empty',
-        portrait: 'tht-portrait'
+        portrait: 'tht-portrait',
+        copy: 'tht-copy',
+        copied: 'tht-copied'
     };
 
     function buildStyles() {
@@ -140,6 +149,22 @@
                 font-size: 12px !important;
                 color: #999 !important;
             }
+            /* 复制磁力按钮：紧贴分辨率徽章右侧，与徽章同高度、同圆角 */
+            .${CLASS.copy} {
+                display: inline-block !important;
+                margin-left: 6px !important;
+                padding: 2px 8px !important;
+                font-size: 12px !important;
+                line-height: 1.6 !important;
+                color: #fff !important;
+                background: #2196f3 !important;
+                border-radius: 3px !important;
+                cursor: pointer !important;
+                user-select: none !important;
+                white-space: nowrap !important;
+            }
+            .${CLASS.copy}:hover { background: #1976d2 !important; }
+            .${CLASS.copy}.${CLASS.copied} { background: #4caf50 !important; }
         `;
     }
 
@@ -225,7 +250,7 @@
     // ---------------- 解析详情页空壳 ----------------
 
     function parseDetail(html) {
-        const out = { imageUrl: null, resolution: null };
+        const out = { imageUrl: null, resolution: null, magnet: null };
         if (!html) return out;
 
         // "domain_image":"image.sohu-cdn.com" / "picture_dir":237591367564358
@@ -239,6 +264,12 @@
         const resM = html.match(/"resolution"\s*:\s*"(\d+)\s*x\s*(\d+)"/);
         if (resM) {
             out.resolution = { width: +resM[1], height: +resM[2], text: resM[1] + 'x' + resM[2] };
+        }
+
+        // "magnet":"magnet:?xt=urn:btih:fa6c..."（JSON 里斜杠可能被转义成 \/，还原一下）
+        const magM = html.match(/"magnet"\s*:\s*"([^"]+)"/);
+        if (magM && magM[1].startsWith('magnet:')) {
+            out.magnet = magM[1].replace(/\\\//g, '/');
         }
 
         return out;
@@ -268,6 +299,60 @@
         badge.textContent = resolution.text;
         badge.style.background = isHighDefinition(resolution) ? '#4CAF50' : '#9e9e9e';
         link.insertAdjacentElement('afterend', badge);
+    }
+
+    // ---------------- 复制磁力 ----------------
+
+    // 剪贴板写入：优先异步 API，非安全上下文/被拒时退回 textarea + execCommand
+    function copyText(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            return navigator.clipboard.writeText(text);
+        }
+        return new Promise((resolve, reject) => {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            // 必须在视口内才能被选中，用 0 尺寸贴顶但不可见
+            ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;';
+            document.body.appendChild(ta);
+            ta.select();
+            ta.setSelectionRange(0, text.length);
+            let ok = false;
+            try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+            ta.remove();
+            if (ok) resolve(); else reject(new Error('复制失败'));
+        });
+    }
+
+    // 按钮插在分辨率徽章右边；没徽章（关了 showResolutionBadge 或无分辨率）就退回标题链接右边
+    function addCopyButton(li, magnet) {
+        const anchor = li.querySelector('.' + CLASS.badge) || li.querySelector('a[href*="movie.php"]');
+        if (!anchor || li.querySelector('.' + CLASS.copy)) return;
+
+        const btn = document.createElement('span');
+        btn.className = CLASS.copy;
+        btn.textContent = '复制磁力';
+        btn.title = magnet;
+
+        const reset = (text, cls) => {
+            btn.textContent = text;
+            if (cls) btn.classList.add(cls);
+            setTimeout(() => {
+                btn.textContent = '复制磁力';
+                btn.classList.remove(CLASS.copied);
+            }, 1200);
+        };
+
+        btn.addEventListener('click', e => {
+            // 放在 span.list_item 里，点它别触发任何父级行为
+            e.preventDefault();
+            e.stopPropagation();
+            copyText(magnet)
+                .then(() => reset('已复制', CLASS.copied))
+                .catch(() => reset('复制失败'));
+        });
+
+        anchor.insertAdjacentElement('afterend', btn);
     }
 
     function addPreview(li, imageUrl, detailUrl) {
@@ -316,6 +401,10 @@
 
             if (CONFIG.showResolutionBadge && data.resolution) {
                 addBadge(li, data.resolution);
+            }
+
+            if (CONFIG.showCopyButton && data.magnet) {
+                addCopyButton(li, data.magnet);
             }
 
             if (data.imageUrl) {
