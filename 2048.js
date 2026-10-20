@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         2048
 // @namespace    https://fby.hfz300.com/
-// @version      5.4
-// @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；去懒加载——列表原生 lazy 与详情页占位图（data-original/data-src）一律立即加载，防抖观察者只接管 AJAX 新插入的图（不监听属性变更）；图片加载队列（10 张/秒、在途≤10、首屏突发 10），列表页"搜索"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；右下角加载进度胶囊。
+// @version      5.5
+// @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；检索页高级搜索「所在版块」默认选中「國內原創」；去懒加载——列表原生 lazy 与详情页占位图（data-original/data-src）一律立即加载，防抖观察者只接管 AJAX 新插入的图（不监听属性变更）；图片加载队列（10 张/秒、在途≤10、首屏突发 10），列表页"搜索"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
 // @run-at       document-idle
@@ -37,8 +37,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-t2048') === '5.4') return;
-  document.documentElement.setAttribute('data-t2048', '5.4');
+  if (document.documentElement.getAttribute('data-t2048') === '5.5') return;
+  document.documentElement.setAttribute('data-t2048', '5.5');
 
   // ============================ 样式 ============================
 
@@ -254,6 +254,26 @@
     }
   };
 
+  // ============================ 检索页默认板块 ============================
+
+  // 高级搜索面板的「所在版块」默认选中国内原创（fid=15）。
+  // 只在用户未做选择（值 all/空）时改一次：页面重载后恢复默认，
+  // 但用户手动改选（含切回"全部版块分类"）后脚本不再插手
+  function applyDefaultSearchBoard() {
+    if (location.pathname.indexOf('/search.php') === -1) return;
+    const panel = document.getElementById('advanced_search');
+    const sel = (panel || document).querySelector('select[name="f_fid"]');
+    if (!sel) return;
+    if (sel.value && sel.value !== 'all') return;   // 已有选择（含 bfcache 恢复）就不动
+    const options = [...sel.options];
+    // 优先按 value 命中；站方改编号时按繁体/简体文本兜底
+    const opt = options.find(o => o.value === '15')
+             || options.find(o => /國內原創|国内原创/.test(o.textContent));
+    if (!opt) return;
+    sel.value = opt.value;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));   // 无 onchange 绑定，派发只为兼容后续联动
+  }
+
   // ============================ 启动 ============================
   function processRoot(root) {
     removeMatching(root);                              // 先清广告再扫图：广告块里的图不处理
@@ -272,5 +292,6 @@
   // 队列模式初始化（无条件，不能依赖开关是否渲染出来）+ 注入开关
   try { queueEnabled = localStorage.getItem(QUEUE_KEY) !== '0'; } catch (e) {}
   injectQueueSwitch();
+  applyDefaultSearchBoard();   // 仅检索页生效；只做一次，不挂观察者
   processRoot(document);
 })();
