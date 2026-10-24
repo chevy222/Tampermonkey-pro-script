@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         U9A9
 // @namespace    https://u9a9.my/
-// @version      1.4
+// @version      1.5
 // @description  U9A9：列表页把详情页的预览图搬到列表显示（最多 5 张，横图 4:3、竖图 3:4 居中裁切），缩略图组右上角显示图片数量/剩余数量；清掉全站推广（横幅、导航推广位、假告示条、详情页侧栏与 JuicyAds）
 // @author       Chevy Yang
 // @match        https://u9a9.my/*
@@ -67,7 +67,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.4';
+  const VERSION = '1.5';
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
   if (document.documentElement.getAttribute('data-u9a9') === VERSION) return;
@@ -333,12 +333,13 @@
     wrap.className = 'u9-thumbs';
 
     // 1 张：居中占半行；2 张：各一半铺满；3/4/5 张：等分整行。
-    // 必须再减 1px 留余量：若按 (100% - 间隙) / n 算，n 张加间隙正好等于 100%，
-    // 浏览器亚像素舍入一旦超出就会把最后一张挤到下一行（2 张变两行、5 张变 4+1）
+    // 括号里的 +1 是「多减 1px」：n 张等分加间隙正好等于 100%，亚像素舍入一旦超出
+    // 就会把最后一张挤到下一行。实测 1114px 容器 / 5 张 / 每张 216.6px 时溢出 0.95px 就换行。
+    // 注意别把这个 +1 当成"加 1px"改掉 —— 它在减号括号内，实际是让每张更窄。
     const cols = shown.length;
     wrap.style.setProperty('--u9-w', cols <= 1
       ? '50%'
-      : `calc((100% - ${(cols - 1) * CFG.gap - 1}px) / ${cols})`);
+      : `calc((100% - ${(cols - 1) * CFG.gap + 1}px) / ${cols})`);
     // 角标的右边距跟着"组"的边界走：≥2 张时组铺满整行，贴容器右侧 6px；
     // 1 张时那张只占半行且居中，右边缘在 75% 处，所以要退 25% + 6px
     wrap.style.setProperty('--u9-badge-r', cols <= 1 ? 'calc(25% + 6px)' : '6px');
