@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         U9A9
 // @namespace    https://u9a9.my/
-// @version      1.5
+// @version      1.7
 // @description  U9A9：列表页把详情页的预览图搬到列表显示（最多 5 张，横图 4:3、竖图 3:4 居中裁切），缩略图组右上角显示图片数量/剩余数量；清掉全站推广（横幅、导航推广位、假告示条、详情页侧栏与 JuicyAds）
 // @author       Chevy Yang
 // @match        https://u9a9.my/*
@@ -67,7 +67,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.5';
+  const VERSION = '1.7';
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
   if (document.documentElement.getAttribute('data-u9a9') === VERSION) return;
@@ -92,6 +92,13 @@
   // ============================ 样式 ============================
 
   const CSS = `
+    /* 站点是 Bootstrap 布局，.container 在宽屏下固定 1170px 居中，1440 屏两侧各留
+       127.5px 空白。列表页给 body 挂 .u9-wide 后强制铺满，导航条/表格/分页一起拉伸，
+       否则只有内容变宽、导航还是窄的，视觉上会断。 */
+    body.u9-wide .container {
+      width: auto !important;
+      max-width: none !important;
+    }
     .u9-thumb-row > td {
       padding: 10px 12px 14px !important;
       background: #f7f8fa !important;
@@ -102,31 +109,40 @@
       display: flex;
       flex-wrap: wrap;
       justify-content: center;    /* 1 张时居中；2 张及以上正好铺满 */
-      align-items: flex-start;    /* 关键：否则同一行的横图会被竖图拉高，4:3 框变成 3:4 */
+      align-items: center;        /* 横竖混排时横图在行内上下居中。别改成 stretch：那会把 4:3 的横框拉成竖图高度 */
       gap: ${CFG.gap}px;
       width: 100%;
     }
     .u9-thumb {
       display: block;
-      position: relative;         /* 角标挂在这张图右上角 */
+      position: relative;         /* 角标的定位基准（角标其实挂在 .u9-thumbs 上） */
       flex: 0 0 auto;
       width: var(--u9-w, 50%);    /* 由 JS 按张数算：1 张 50%，2 张 1/2，…，5 张 1/5 */
       box-sizing: border-box;     /* 边框算进宽度，否则 5 张会差几像素换行 */
-      aspect-ratio: 4 / 3;
       overflow: hidden;
       border: 1px solid #dcdcdc;
       border-radius: 4px;
       background: #e9ecef;
       text-decoration: none !important;
     }
-    /* 竖图加载完成后切 3:4 竖框；两种框都是 object-fit:cover，居中裁切不拉伸 */
-    .u9-thumb.u9-port { aspect-ratio: 3 / 4; }
-    .u9-thumb img {
+    /* 比例用伪元素的百分比 padding 撑，不用 aspect-ratio。
+       padding 百分比在所有浏览器都按包含块宽度算，Safari 上不会像
+       aspect-ratio + img height:100% 那样出现尺寸解析差异（实测表现为裁切偏一边）。 */
+    .u9-thumb::before {
+      content: '';
       display: block;
+      padding-top: 75%;           /* 4:3 横框 */
+    }
+    /* 竖图加载完成后切 3:4 竖框 */
+    .u9-thumb.u9-port::before { padding-top: 133.3333%; }
+    .u9-thumb img {
+      position: absolute;
+      top: 0;
+      left: 0;
       width: 100%;
       height: 100%;
       object-fit: cover;
-      object-position: center;
+      object-position: center;    /* 裁切永远居中，不会偏到某一边 */
     }
     .u9-badge {
       position: absolute;
@@ -455,6 +471,9 @@
 
     const rows = collectRows();
     if (!rows.length) return;   // 详情页/其它页面：缩略图不做，广告上面已经清完
+
+    // 列表页铺满视口，去掉 .container 固定宽度留下的左右空白（详情页保持原布局）
+    document.body.classList.add('u9-wide');
 
     injectStyles();
     rows.forEach(({ tr, href }) => processRow(tr, href));
