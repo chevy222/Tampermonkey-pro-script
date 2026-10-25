@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>色花堂检索页逻辑 · v5.25</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2128;
+    --line: #30363d;
+    --text: #c9d1d9;
+    --dim: #8b949e;
+    --blue: #58a6ff;
+    --green: #3fb950;
+    --amber: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 24px 64px;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.65 -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; letter-spacing: .2px; }
+  .sub { color: var(--dim); font-size: 13px; margin: 0 0 28px; }
+  code {
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 12.5px; background: #21262d; padding: 1px 5px; border-radius: 4px; color: #79c0ff;
+  }
+
+  .step {
+    display: flex; gap: 14px; align-items: flex-start;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px 16px;
+    border-left: 3px solid var(--blue);
+  }
+  .step.green { border-left-color: var(--green); }
+  .step.amber { border-left-color: var(--amber); }
+  .step.red { border-left-color: var(--red); }
+  .step.purple { border-left-color: var(--purple); }
+  .idx {
+    flex: 0 0 24px; height: 24px; border-radius: 50%;
+    background: #21262d; color: var(--dim);
+    font-size: 12px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+    margin-top: 1px;
+  }
+  .body { flex: 1; min-width: 0; }
+  .body h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; }
+  .body p { margin: 0; color: var(--dim); font-size: 13px; }
+
+  .down { width: 2px; height: 26px; background: var(--line); margin: 0 auto; position: relative; }
+  .down::after {
+    content: ""; position: absolute; left: -4px; bottom: -1px;
+    border: 5px solid transparent; border-top-color: var(--line);
+  }
+  .split { width: 2px; height: 18px; background: var(--line); margin: 0 auto; }
+
+  .branches {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+    margin: 12px 0;
+  }
+  .branch {
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 11px 12px; font-size: 12.5px; line-height: 1.5;
+  }
+  .branch b { display: block; font-size: 12px; margin-bottom: 3px; }
+  .branch span { color: var(--dim); }
+  .branch.ok { border-color: #238636; }
+  .branch.ok b { color: var(--green); }
+  .branch.warn { border-color: #9e6a03; }
+  .branch.warn b { color: var(--amber); }
+  .branch.err { border-color: #8e2a25; }
+  .branch.err b { color: var(--red); }
+  .branch.dead { border-color: #6e40c9; }
+  .branch.dead b { color: var(--purple); }
+
+  .loopbox {
+    border: 1px dashed var(--line); border-radius: 10px;
+    padding: 14px; margin: 5px 0;
+  }
+  .loopbox > .tag {
+    font-size: 11px; color: var(--dim); letter-spacing: .08em;
+    text-transform: uppercase; margin-bottom: 10px;
+  }
+
+  h2 { font-size: 15px; font-weight: 600; margin: 40px 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 500; font-size: 12px; }
+  td:first-child { white-space: nowrap; }
+  td code { font-size: 12px; }
+
+  .actions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .action {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 12px 14px; font-size: 13px;
+  }
+  .action b { color: var(--blue); font-weight: 600; }
+  .action p { margin: 4px 0 0; color: var(--dim); font-size: 12.5px; }
+
+  .note {
+    margin-top: 28px; padding: 14px 16px;
+    background: #161b22; border: 1px solid var(--line);
+    border-left: 3px solid var(--amber); border-radius: 8px;
+    font-size: 13px; color: var(--dim);
+  }
+  .note b { color: var(--text); }
+  .note ul { margin: 8px 0 0; padding-left: 18px; }
+  .note li { margin: 3px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>色花堂检索页逻辑</h1>
+  <p class="sub">色花堂.js v5.25 · 仅 <code>/search.php</code> 页面 · 原站一页 30 条结果</p>
+
+  <div class="step">
+    <div class="idx">1</div>
+    <div class="body">
+      <h3>页面加载 · onDomReady()</h3>
+      <p>路径含 <code>/search.php</code> 才进检索页分支。先无条件过一遍 <code>injectQueueSwitch()</code>，再调 <code>searchBusyRetry()</code>。</p>
+    </div>
+  </div>
+
+  <div class="down"></div>
+
+  <div class="step amber">
+    <div class="idx">2</div>
+    <div class="body">
+      <h3>searchBusyRetry() · 拦截判断</h3>
+      <p>判据是「页面上有没有 <code>#threadlist li.pbw</code>」，不是文案。可重试分支重试成功后只替换 <code>#threadlist</code> + <code>.pg</code>，不整页刷新。</p>
+    </div>
+  </div>
+
+  <div class="branches">
+    <div class="branch ok"><b>有结果条目</b><span>直接放行，进第 3 步</span></div>
+    <div class="branch warn"><b>可重试</b><span>限频 / 5xx / 超时：按原站给的秒数倒计时，fetch 重试</span></div>
+    <div class="branch err"><b>不可重试</b><span>验证码 / 未登录：提示，停</span></div>
+    <div class="branch dead"><b>空壳页</b><span>无结果也无提示 → 快照失效，停</span></div>
+  </div>
+
+  <div class="down"></div>
+
+  <div class="step">
+    <div class="idx">3</div>
+    <div class="body">
+      <h3>searchPageMain() · 初始化</h3>
+      <p>清旧开关/分页条 → 读 URL 的 <code>page</code> 还原 <code>readPages</code> → <code>collectSearchItems()</code> 收集条目 → <code>searchTotalPages()</code> 取总页数 → 挂过滤开关和分页条。</p>
+    </div>
+  </div>
+
+  <div class="down"></div>
+
+  <div class="step green">
+    <div class="idx">4</div>
+    <div class="body">
+      <h3>applyFilter() · 过滤 + 切片</h3>
+      <p>遍历 <code>searchState.items</code>，按勾选的栏目算出谁该显示 → 得到 <code>matched</code> 数组 → 按 <code>page</code> 切出第 <code>(page-1)×30</code> 到 <code>page×30</code> 条 → 其余的 <code>display:none</code>。</p>
+    </div>
+  </div>
+
+  <div class="down"></div>
+
+  <div class="loopbox">
+    <div class="tag">补齐循环 · 每轮间隔 5 秒，单轮上限 12 页</div>
+
+    <div class="step purple">
+      <div class="idx">5</div>
+      <div class="body">
+        <h3>scheduleFill() · 决定要不要补</h3>
+        <p>条件：<code>matched &lt; page × 30</code> 且还有 <code>nextUrl</code> 且 <code>fetched &lt; 12</code> 且没暂停。满足就 <code>setTimeout(fillNextPage, 5000)</code>。</p>
+      </div>
+    </div>
+
+    <div class="down"></div>
+
+    <div class="step purple">
+      <div class="idx">6</div>
+      <div class="body">
+        <h3>fillNextPage() · 抓下一页</h3>
+        <p><code>fetchSearchPage(nextUrl)</code> → 成功则 <code>appendSearchItems()</code> 追加（按 tid 去重）→ <code>readPages+1</code> → <code>syncUrlPage()</code> 写回 URL → 回到第 4 步重算。</p>
+      </div>
+    </div>
+
+    <div class="branches" style="grid-template-columns: repeat(3, 1fr);">
+      <div class="branch ok"><b>抓成功</b><span>追加 → 重算 → 继续下一轮</span></div>
+      <div class="branch warn"><b>限频 / 超时</b><span>停手，按钮留给用户手动重试</span></div>
+      <div class="branch dead"><b>快照失效</b><span>按钮变「重新搜索」</span></div>
+    </div>
+  </div>
+
+  <div class="down"></div>
+
+  <div class="step green">
+    <div class="idx">7</div>
+    <div class="body">
+      <h3>渲染 · loadDetailThumbs() + 胶囊</h3>
+      <p>对当前可见的条目逐帖抓详情页取图（并发 5），图片按 4 张/秒进加载池；右下角胶囊实时统计成功/等待/失败/总数。</p>
+    </div>
+  </div>
+
+  <h2>用户操作怎么改变状态</h2>
+  <div class="actions">
+    <div class="action">
+      <b>上一页 / 下一页</b>
+      <p><code>page ± 1</code> → applyFilter → <code>pill.reset()</code> 胶囊清零 → 给新一页取图 → 写回 URL。<br>本页没补满时「下一页」禁用。</p>
+    </div>
+    <div class="action">
+      <b>继续补齐</b>
+      <p>清空 <code>error / paused / fetched</code> → 重新进补齐循环。胶囊<strong>继续累加</strong>，不清零。</p>
+    </div>
+    <div class="action">
+      <b>勾选 / 取消栏目</b>
+      <p>回到第 1 页 → applyFilter 重算 → 存 localStorage → 给新可见的条目取图 → 重新补齐。</p>
+    </div>
+    <div class="action">
+      <b>重新搜索（仅失效时出现）</b>
+      <p>用当前关键词重新发起一次搜索，拿新的 <code>searchmd5</code>，从第 1 页重来。</p>
+    </div>
+  </div>
+
+  <h2>searchState 字段</h2>
+  <table>
+    <tr><th>字段</th><th>作用</th></tr>
+    <tr><td><code>items</code></td><td>所有抓到的条目 <code>{el, forum, matches}</code>，含补齐进来的</td></tr>
+    <tr><td><code>page</code></td><td>脚本自己的页码（筛选结果分页），和原站页码不是一个维度</td></tr>
+    <tr><td><code>readPages</code></td><td>已读到原站第几页，状态栏显示 + 写进 URL 用</td></tr>
+    <tr><td><code>totalPages</code></td><td>原站总页数，从分页条最大 <code>page=N</code> 推</td></tr>
+    <tr><td><code>nextUrl</code></td><td>原站「下一页」链接，抓不到就没有了</td></tr>
+    <tr><td><code>fetched</code></td><td>本轮补抓了几页，只用于 12 页上限保护；点「继续补齐」清零</td></tr>
+    <tr><td><code>filling / paused / error</code></td><td>运行态：正在抓 / 用户暂停 / 上一次失败原因</td></tr>
+    <tr><td><code>expired</code></td><td>搜索快照失效，重试没意义</td></tr>
+  </table>
+
+  <div class="note">
+    <b>两个硬约束（来自原站，不是脚本能绕的）</b>
+    <ul>
+      <li>抓页间隔不能小于 5 秒 —— 实测 2 秒时抓 3 页就被限频。</li>
+      <li>搜索结果是带时效的快照，<code>searchmd5</code> 过期后服务端返回既无结果也无提示的空壳页。实测读 8 页左右就可能失效，之后只能重搜。</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>
