@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      5.20
-// @description  色花堂：去广告；PC 列表页注入移动版缩略图（默认 4:3 横框，竖图加载完成后切 3:4 竖框，均居中裁切不拉伸；每行最多 5 张；右上角图片总数角标；宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片按队列节奏加载（默认 4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 搜索繁忙自动重试；右下角加载进度胶囊。
+// @version      5.27
+// @description  色花堂：去广告；PC 列表页注入移动版缩略图（默认 4:3 横框，竖图加载完成后切 3:4 竖框，均居中裁切不拉伸；每行最多 5 张；右上角图片总数角标；宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片按队列节奏加载（默认 4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 按筛选结果自动翻页补齐（凑不满一页就往后抓原站，最多 12 页）+ 拦截原因分类重试（验证码/未登录不重试，限频按原站给的等待秒数）；右下角加载进度胶囊（翻页重算，继续补齐累加）。
 // @author       Chevy Yang
 // @match        https://xtsa.wqfj3.com/*
 // @connect      xtsa.wqfj3.com
@@ -16,8 +16,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '5.20') return;
-  document.documentElement.setAttribute('data-sehua', '5.20');
+  if (document.documentElement.getAttribute('data-sehua') === '5.27') return;
+  document.documentElement.setAttribute('data-sehua', '5.27');
 
   // ============================ 可调参数 ============================
 
@@ -59,6 +59,15 @@
   // 搜索繁忙重试计数的 sessionStorage 键名
   const BUSY_KEY = 'sehuaBusyRetry';
 
+  // 搜索页每页条数（原站一页 30 条，合并分页按它算"补满一页"的目标）
+  const SEARCH_PER_PAGE = 30;
+
+  // 合并分页：两次抓页的最小间隔，以及单轮最多自动补抓几页。
+  // 12 页是实测定出来的：搜"探花"时 60 条原始结果只有 7 条能过默认过滤（命中率约 12%），
+  // 想补满一页 30 条得往上翻 9 页左右。间隔不能小于 5 秒 —— 实测 2 秒时抓 3 页就被原站限频
+  const SEARCH_FILL_GAP = 5000;
+  const SEARCH_FILL_MAX = 12;
+
   // 图片加载节奏（对齐移动版实测：最大在途 6 路，滚动浏览约 3-6 张/秒）。
   // 与固定批间隔不同：令牌桶滚动发放、完成即抢下一张，不人为等整批
   const IMG_INFLIGHT_MAX = 6;
@@ -98,7 +107,14 @@
   }
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const addStyle = css => document.head.insertAdjacentHTML('beforeend', `<style>${css}</style>`);
+  // 同一段 CSS 只注入一次：拦截重试成功后会再调一次 searchPageMain()，
+  // 不判重的话每次重试都往 head 里堆一份完整的样式表
+  const injectedCss = new Set();
+  const addStyle = css => {
+    if (injectedCss.has(css)) return;
+    injectedCss.add(css);
+    document.head.insertAdjacentHTML('beforeend', `<style>${css}</style>`);
+  };
 
   // sessionStorage 在"禁用站点数据"、隐私模式等情况下，连 getItem 都会抛 SecurityError。
   // searchBusyRetry 是 onDomReady 的前置步骤，那里抛一次错就足以让缩略图、去广告、详情页全部停摆，
@@ -118,6 +134,107 @@
     onload: resp => { try { resolve(resp.responseText.includes('safeid') ? null : parse(resp.responseText)); } catch (e) { resolve(null); } },
     ontimeout: () => resolve(null), onerror: () => resolve(null)
   }));
+
+  // 搜索页专用 GET：保留状态码与响应头（gmGet 把失败原因吞成 null，分类重试需要它们）。
+  // 刻意不带移动 UA —— 触屏模板里没有 #threadlist，合并分页只认 PC 模板
+  const gmFetchRaw = url => new Promise(resolve => {
+    if (typeof GM_xmlhttpRequest === 'function') {
+      GM_xmlhttpRequest({
+        url, timeout: REQUEST_TIMEOUT,
+        onload: resp => resolve({ status: resp.status, headers: resp.responseHeaders || '', text: resp.responseText || '' }),
+        ontimeout: () => resolve({ status: 0, headers: '', text: '' }),
+        onerror: () => resolve({ status: 0, headers: '', text: '' })
+      });
+      return;
+    }
+    // 没有 GM（脚本被以页面上下文注入时）退回同源 fetch，同样带超时
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), REQUEST_TIMEOUT);
+    fetch(url, { credentials: 'same-origin', signal: ctl.signal })
+      .then(r => r.text().then(t => ({ status: r.status, headers: '', text: t })))
+      .catch(() => ({ status: 0, headers: '', text: '' }))
+      .then(v => { clearTimeout(timer); resolve(v); });
+  });
+
+  // 把一次失败的搜索响应归类：能不能重试、要等多久、给人看什么话。
+  // 调用方必须先确认"页面里没有结果条目"再调它 —— 成功页正文里也可能出现"等待 N 秒"字样
+  function classifySearchFailure(res) {
+    const text = res.text || '', headers = res.headers || '';
+    // status 0 = 请求根本没打通（超时 / 连接被拒 / DNS 失败）。这是网络问题，值得重试；
+    // 之前落到最后的兜底分支会被判成"不可重试"，一次抖动就让合并分页永久放弃
+    if (!res.status) return { retry: true, waitMs: 3000, msg: '请求原站失败（超时或连接中断）' };
+    if (res.status === 429 || res.status === 408 || res.status >= 500) {
+      const ra = (headers.match(/^retry-after:\s*(.+)$/im) || [])[1];
+      let wait = 5000;
+      if (ra) {
+        const v = ra.trim();
+        wait = /^\d+$/.test(v) ? (+v) * 1000 : Date.parse(v) - Date.now();
+      }
+      return { retry: true, waitMs: Math.min(Math.max(wait, 1000), 60000), msg: '原站返回 HTTP ' + res.status };
+    }
+    if (/验证码|安全验证|人机验证|checking your browser|just a moment|captcha/i.test(text))
+      return { retry: false, msg: '原站要求验证，请手动打开搜索结果页处理' };
+    if (/请先登录|尚未登录|需要登录|您需要登录/.test(text))
+      return { retry: false, msg: '原站要求登录，请重新登录后再搜' };
+    // 冷却类提示按原站给的秒数等。原站实际文案是"搜索过于频繁，请30秒后再试"——
+    // "请"后面直接跟数字，所以不能只认"等待/请等/间隔"开头
+    const sm = text.match(/(\d+)\s*秒(?:后|内|之后)/) || text.match(/(?:等待|请等|间隔)\s*(\d+)\s*秒/);
+    if (sm) return { retry: true, waitMs: Math.max(1000, (+sm[1]) * 1000), msg: `原站要求等待 ${sm[1]} 秒` };
+    if (/搜索繁忙/.test(text)) return { retry: true, waitMs: 4000, msg: '搜索繁忙' };
+    if (/过于频繁|频率|稍后再|too many|rate.?limit/i.test(text))
+      return { retry: true, waitMs: 10000, msg: '原站限制访问频率' };
+    return { retry: false, msg: '搜索结果页没有结果条目' };
+  }
+
+  // 下一页地址：只认原站自己的 nxt 链接，别自己拼参数（searchid / searchmd5 会变）
+  const searchNextUrl = doc => {
+    const a = doc.querySelector('.pg a.nxt, .pages a.next, a.nxt');
+    if (!a) return null;
+    try { return new URL(a.getAttribute('href'), location.href).href; } catch (e) { return null; }
+  };
+
+  // 原站总页数：分页条只列当前页附近的几个页码 + 末尾页，取其中最大的 page 值即可。
+  // 页面没有"共 N 页"文案，只能这么算
+  const searchTotalPages = doc => {
+    const pg = doc.querySelector('.pg, .pages');
+    if (!pg) return 0;
+    let max = 0;
+    pg.querySelectorAll('a').forEach(a => {
+      const m = (a.getAttribute('href') || '').match(/[?&]page=(\d+)/);
+      if (m) max = Math.max(max, +m[1]);
+    });
+    return max;
+  };
+
+  // 把「下次该从原站第几页开始读」写进 URL 的 page 参数。
+  // 刷新时服务端直接返回那一页，脚本接着往后补，不用从第 1 页重来。
+  // 注意：这个 page 是原站页码，不是脚本自己的筛选结果页码，两者不是一个维度。
+  // 用 replaceState 而不是 pushState——翻页不该在浏览器历史里堆一堆记录
+  function syncUrlPage() {
+    try {
+      const url = new URL(location.href);
+      url.searchParams.set('page', String(searchState.readPages + 1));
+      history.replaceState(null, '', url);
+    } catch (e) {}
+  }
+
+  // 抓一页搜索结果。成功判据是「解析出结果条目」而不是文案，避免被正文里的"等待/频繁"字样误杀
+  async function fetchSearchPage(url) {
+    const res = await gmFetchRaw(url);
+    let doc = null, items = [];
+    try {
+      doc = new DOMParser().parseFromString(res.text || '', 'text/html');
+      items = [...doc.querySelectorAll('#threadlist li.pbw')];
+    } catch (e) { doc = null; }
+    if (items.length) return { ok: true, doc, items, next: searchNextUrl(doc) };
+    const info = classifySearchFailure(res);
+    // 连 #threadlist 容器都没有、也没有任何提示文案 —— 这是 Discuz 搜索快照过期后的静默空壳页。
+    // 这种情况重试没用（同一个 searchmd5 已经作废），只能重新搜索；要单独标出来给用户一条出路
+    if (doc && !doc.getElementById('threadlist') && info.msg === '搜索结果页没有结果条目') {
+      return { ok: false, retry: false, expired: true, msg: '搜索快照已失效（原站时效限制，隔太久不翻页就会过期）' };
+    }
+    return Object.assign({ ok: false, doc: null, items: [], next: null }, info);
+  }
 
   // 移动版触屏模板取图（筛选参数透传）。
   // 返回 {map, fallback, totals}：map=tid->图址列表；fallback=有卡无图的 tid；
@@ -215,13 +332,14 @@
   function trackImage(img, url) {
     if (img.dataset.watched) return;   // 同一节点只计一次
     img.dataset.watched = '1';
-    pill.add(1);
+    const ep = pill.epoch;             // 绑定当前代际：翻页重置后这批图的迟到回调会被丢弃
+    pill.add(1, ep);
     // settledHere = 这张图的最终状态已确定（成功或明确失败）。守卫放在分支之前，
     // 保证 load 和 error 各来一次也只结算一次（{once:true} 只管单个监听器自删，
     // 挡不住 load 成功后 src 又被改成坏址导致的第二次事件）。
     // 超时路径不置位——那时只是转入"等待中"，迟到落地还要靠 resolveUndecided 补结算
     let settledHere = false, timedOut = false;
-    const settle = failed => { pill.settle(failed); };
+    const settle = failed => { pill.settle(failed, ep); };
     // 默认框即 4:3 横框（横图/方图加载前后不跳框）；只有竖图在加载完成后切 3:4 竖框（裁上下）
     const markOrientation = () => {
       const a = img.closest('a');
@@ -230,18 +348,18 @@
     const start = poolDone => {
       let released = false;
       const release = () => { if (released) return; released = true; clearTimeout(to); if (poolDone) poolDone(); };
-      const to = setTimeout(() => { timedOut = true; pill.markUndecided(); release(); }, IMG_HOLD_TIMEOUT);
+      const to = setTimeout(() => { timedOut = true; pill.markUndecided(ep); release(); }, IMG_HOLD_TIMEOUT);
       img.addEventListener('load', () => {
         if (settledHere) { release(); return; }
         settledHere = true;
         markOrientation();
-        if (timedOut) pill.resolveUndecided(true); else settle(false);   // 迟到成功：补结算，不计失败
+        if (timedOut) pill.resolveUndecided(true, ep); else settle(false);   // 迟到成功：补结算，不计失败
         release();
       }, { once: true });
       img.addEventListener('error', () => {
         if (settledHere) { release(); return; }
         settledHere = true;
-        if (timedOut) pill.resolveUndecided(false); else settle(true);   // 迟到明确失败：补结算 + 计失败
+        if (timedOut) pill.resolveUndecided(false, ep); else settle(true);   // 迟到明确失败：补结算 + 计失败
         release();
       }, { once: true });
       if (url) img.setAttribute('src', url);
@@ -321,6 +439,10 @@
     .slst.mtw { width: 100% !important; box-sizing: border-box !important; }
     #threadlist { width: 100% !important; }
     #threadlist li.pbw { width: 100% !important; box-sizing: border-box !important; }
+    .sehua-pager { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 12px 0 4px; font-size: 12px; color: #666; }
+    .sehua-pager button { padding: 3px 12px; border: 1px solid #ccc; background: #fff; border-radius: 3px; cursor: pointer; font-size: 12px; color: #333; }
+    .sehua-pager button:disabled { opacity: .45; cursor: not-allowed; }
+    .sehua-pager .sehua-pager-state { color: #888; }
   `;
 
   // 进度胶囊样式（沿用旧版式）
@@ -336,21 +458,29 @@
 
   const pill = {
     total: 0, settled: 0, failed: 0, undecided: 0, el: null, timer: null,
+    // 代际号：翻页时 reset() 会 +1。上一页的图还在飞，load/error 照样会回调，
+    // 靠它把这些迟到事件丢掉 —— 否则重置后 settled 会超过 total，显示"成功 5 · 共 0"
+    epoch: 0,
 
-    add(n) {
+    add(n, ep) {
+      if (ep !== this.epoch) return;
       this.total += n;
       clearTimeout(this.timer); this.timer = null;   // 新图入账，撤销淡出计时
       if (this.el) this.el.style.opacity = '';
       this.render();
     },
 
-    settle(failed) { this.settled++; if (failed) this.failed++; this.render(); },
+    settle(failed, ep) {
+      if (ep !== this.epoch) return;
+      this.settled++; if (failed) this.failed++; this.render();
+    },
 
     // 超时只释放池配额，图仍在等待响应——记为"未决"，不算失败（失败只认明确的 error：404/拒绝/解码失败）：
     // 胶囊不算完成、不淡出，文案显示"N 张等待中"，一直等到图真正落地或用户介入（刷新）。
     // 不做"超时两次就判失败"的兜底——那会制造 settled 越界、迟到误清计时器、宽限不顺延三类 bug，
     // 而且把"还在等"谎报成"失败了"。宁可让胶囊一直挂着等用户处理。
-    markUndecided() {
+    markUndecided(ep) {
+      if (ep !== this.epoch) return;
       this.undecided++;
       this.render();
     },
@@ -358,12 +488,22 @@
     // 未决图迟到落地：补结算。lateOk=true 迟到成功（不计失败），false 迟到明确失败。
     // 账上没有未决就直接返回：正常流程走不到这里，真走到了说明不变式已破（配对丢了），
     // 这时再多记一个 settled 会让"成功+失败+等待"超过"共"，宁可不记账也不谎报
-    resolveUndecided(lateOk) {
+    resolveUndecided(lateOk, ep) {
+      if (ep !== this.epoch) return;
       if (!this.undecided) return;
       this.undecided--;
       this.settled++;
       if (!lateOk) this.failed++;
       this.render();
+    },
+
+    // 翻页（换成另一批内容）时清零重算，代际号 +1 让上一页的迟到回调失效。
+    // 「继续补齐」是同一批继续往后加载，不调这里，计数继续累加
+    reset() {
+      this.epoch += 1;
+      this.total = 0; this.settled = 0; this.failed = 0; this.undecided = 0;
+      clearTimeout(this.timer); this.timer = null;
+      if (this.el) { this.el.remove(); this.el = null; }
     },
 
     // 四段固定文案：成功/等待/失败语义不变，中间态与终态不再切换分子含义
@@ -485,12 +625,199 @@
     return wrap;
   }
 
+  // 检索页状态：已抓到的全部条目（含自动补齐进来的）、脚本自己的页码、下一页地址。
+  // 原站一页固定 30 条，过滤掉隐藏栏目后常只剩几条，所以不跟着原站翻页，
+  // 而是自己维护页码，不够就往后抓页补满
+  const searchState = {
+    items: [],        // [{ el, forum, matches }]
+    page: 1,          // 脚本自己的页码（筛选结果分页），和原站页码无关
+    nextUrl: null,
+    totalPages: 0,    // 原站一共多少页（从分页条最大页码推）
+    readPages: 1,     // 已经读到原站第几页，刷新后从这页继续
+    filling: false,
+    paused: false,
+    fetched: 0,       // 本轮已经补抓了几页（只管限流保护，点「继续补齐」会清零）
+    error: '',
+    expired: false    // 搜索快照失效：重试没意义，只能重新搜索
+  };
+
+  // 把 DOM 里所有结果条目收进 items（已在 items 里的跳过）
+  function collectSearchItems() {
+    const seen = new Set(searchState.items.map(it => it.el));
+    document.querySelectorAll('#threadlist li.pbw').forEach(li => {
+      if (seen.has(li)) return;
+      const fl = li.querySelector('a[href*=forum-]');
+      searchState.items.push({ el: li, forum: fl ? fl.textContent.trim() : '', matches: true });
+    });
+  }
+
+  // 追加抓回来的条目，按 li 的 id（tid）去重，避免跨页重复
+  function appendSearchItems(items) {
+    const host = document.querySelector('#threadlist ul.ml') || document.querySelector('#threadlist ul') || document.getElementById('threadlist');
+    if (!host) return 0;
+    const seen = new Set(searchState.items.map(it => it.el.id));
+    const frag = document.createDocumentFragment();
+    let added = 0;
+    items.forEach(li => {
+      if (!li.id || seen.has(li.id)) return;
+      seen.add(li.id);
+      frag.appendChild(li);
+      added += 1;
+    });
+    host.appendChild(frag);
+    collectSearchItems();
+    return added;
+  }
+
+  let searchPager = null;
+
+  // 原站分页条隐藏（内容已跨页合并），换成脚本自己的分页条
+  function mountSearchPager() {
+    searchPager = document.querySelector('.sehua-pager');
+    if (searchPager) return;
+    const bar = document.createElement('div');
+    bar.className = 'sehua-pager';
+    const prev = Object.assign(document.createElement('button'), { type: 'button', textContent: '上一页' });
+    const next = Object.assign(document.createElement('button'), { type: 'button', textContent: '下一页' });
+    const more = Object.assign(document.createElement('button'), { type: 'button', textContent: '继续补齐' });
+    const label = Object.assign(document.createElement('span'), { className: 'sehua-pager-state' });
+    prev.addEventListener('click', () => gotoSearchPage(-1));
+    next.addEventListener('click', () => gotoSearchPage(1));
+    more.addEventListener('click', () => {
+      // 快照失效后重试同一个 searchmd5 没用，只能拿同一个关键词重新发起一次搜索
+      if (searchState.expired) { reSearchFromCurrent(); return; }
+      searchState.paused = false; searchState.error = ''; searchState.fetched = 0;
+      scheduleFill(); updateSearchPager();
+    });
+    bar.append(prev, next, more, label);
+    const pg = document.querySelector('.pg');
+    if (pg) { pg.style.display = 'none'; pg.insertAdjacentElement('beforebegin', bar); }
+    else {
+      const list = document.getElementById('threadlist');
+      if (!list) return;
+      list.insertAdjacentElement('afterend', bar);
+    }
+    searchPager = bar;
+  }
+
+  // 用当前关键词重新发起搜索（会拿到新的 searchid/searchmd5）。
+  // 代价是从第 1 页重来，但搜索快照失效后这是唯一能继续读下去的路
+  function reSearchFromCurrent() {
+    const sp = new URLSearchParams(location.search);
+    const kw = sp.get('kw') || sp.get('srchtxt');
+    if (!kw) { location.reload(); return; }
+    location.href = `search.php?mod=forum&srchtxt=${encodeURIComponent(kw)}&searchsubmit=yes`;
+  }
+
+  function gotoSearchPage(delta) {
+    const st = searchState;
+    if (st.filling) return;
+    const before = st.page + delta;
+    if (before < 1) return;
+    // 本页还没补满时不许往后翻，先让补齐跑完
+    if (delta > 0 && st.items.filter(it => it.matches).length < st.page * SEARCH_PER_PAGE) return;
+    st.page = before;
+    applyFilter();
+    // 换页等于换一批内容：胶囊清零重算，只统计这一页的图。
+    // 「继续补齐」是同一批继续往后加载，不重置 —— 那里保持累加
+    pill.reset();
+    // 新一页的帖子还没取过图，不在这里触发的话翻过去只有一排光标题
+    loadDetailThumbs();
+    const list = document.getElementById('threadlist');
+    if (list && list.scrollIntoView) list.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    syncUrlPage();
+    scheduleFill();
+  }
+
+  function updateSearchPager() {
+    if (!searchPager) return;
+    const st = searchState;
+    const matched = st.items.filter(it => it.matches).length;
+    const start = (st.page - 1) * SEARCH_PER_PAGE;
+    const full = matched >= st.page * SEARCH_PER_PAGE;
+    const [prev, next, more] = searchPager.querySelectorAll('button');
+    const label = searchPager.querySelector('.sehua-pager-state');
+    prev.disabled = st.page <= 1 || st.filling;
+    // 下一页必须有东西才让点：matched 要超过当前页末尾。
+    // 原来只判 full（当前页满没满），matched 恰好 = page×30 时仍可点，翻过去是空白页
+    next.disabled = st.filling || matched <= st.page * SEARCH_PER_PAGE;
+    // 只有正在请求时才禁用：之前 nextUrl 一被清空按钮就永久锁死，用户连重试都点不到
+    more.disabled = st.filling;
+    more.textContent = st.expired ? '重新搜索' : '继续补齐';
+    const shown = Math.max(0, Math.min(SEARCH_PER_PAGE, matched - start));
+    let tail;
+    if (st.filling) tail = '正在读取原站下一页…';
+    else if (st.expired) tail = st.error + '，点「重新搜索」用同一个关键词从头再搜';
+    else if (st.error) tail = st.error + (st.nextUrl ? '（点「继续补齐」重试）' : '');
+    else if (!st.nextUrl) tail = '已到底';
+    else if (full) tail = '本页已满';
+    // 补到单轮上限时 scheduleFill 已经不排定时器了，必须单独说明，
+    // 否则会一直显示"正在补齐"却一个请求都不发
+    else if (st.fetched >= SEARCH_FILL_MAX) tail = `本轮已补 ${SEARCH_FILL_MAX} 页，点「继续补齐」再抓`;
+    else if (st.paused) tail = '已暂停补齐';
+    else tail = '5 秒后继续补齐…';   // 这个状态只是在等定时器，并没有发请求
+    const totalTxt = st.totalPages ? ` / ${st.totalPages}` : '';
+    label.textContent = `第 ${st.page} 页 · 本页 ${shown} / ${SEARCH_PER_PAGE} 条 · 筛选后共 ${matched} 条 · 已读原站 ${st.readPages}${totalTxt} 页 · ${tail}`;
+    // 「筛选后共」容易被读成"本次搜索命中"，这里补个悬浮说明
+    label.title = '「筛选后共」= 已经抓下来的全部原始结果里，没被栏目过滤掉的总条数。'
+      + '「已读原站」= 为了凑够这一页，一共往后翻了多少个原站页面（斜杠后面是原站总页数）。';
+  }
+
+  let fillTimer = null;
+
+  function scheduleFill() {
+    clearTimeout(fillTimer);
+    const st = searchState;
+    if (st.filling || st.paused || !st.nextUrl) return;
+    if (st.fetched >= SEARCH_FILL_MAX) return;
+    if (st.items.filter(it => it.matches).length >= st.page * SEARCH_PER_PAGE) return;
+    fillTimer = setTimeout(fillNextPage, SEARCH_FILL_GAP);
+  }
+
+  async function fillNextPage() {
+    const st = searchState;
+    if (st.filling || st.paused || !st.nextUrl) return;
+    st.filling = true;
+    updateSearchPager();
+    let r;
+    try {
+      r = await fetchSearchPage(st.nextUrl);
+    } catch (e) {
+      // 请求本身抛错也要把 filling 放开，否则补齐功能会永久卡在"正在读取"
+      r = { ok: false, retry: true, msg: '抓取下一页失败：' + ((e && e.message) || e) };
+    } finally {
+      st.filling = false;
+    }
+    if (!r.ok) {
+      st.error = r.msg || '抓取下一页失败';
+      if (r.expired) st.expired = true;
+      if (!r.retry) st.nextUrl = null;   // 验证码/未登录这类不可重试，别再自动试
+      updateSearchPager();
+      return;
+    }
+    appendSearchItems(r.items);
+    st.nextUrl = r.next;
+    st.fetched += 1;
+    st.readPages += 1;
+    st.error = '';
+    applyFilter();
+    loadDetailThumbs();
+    syncUrlPage();   // 把"读到第几页"写进 URL，刷新后从这页接着读
+    scheduleFill();
+  }
+
   function applyFilter() {
     const hidden = {};
     document.querySelectorAll('.sehua-forum-switch input:checked').forEach(cb => hidden[cb.dataset.forum] = 1);
-    document.querySelectorAll('#threadlist li.pbw').forEach(li => {
-      const fl = li.querySelector('a[href*=forum-]'); li.style.display = hidden[fl ? fl.textContent.trim() : ''] ? 'none' : '';
+    const matched = [];
+    searchState.items.forEach(it => {
+      it.matches = !hidden[it.forum];
+      if (it.matches) matched.push(it);
     });
+    const start = (searchState.page - 1) * SEARCH_PER_PAGE;
+    searchState.items.forEach(it => { it.el.style.display = 'none'; });
+    matched.slice(start, start + SEARCH_PER_PAGE).forEach(it => { it.el.style.display = ''; });
+    updateSearchPager();
   }
 
   // 取图池核心：并发逐帖取详情图，注入 target 并计入胶囊
@@ -542,35 +869,111 @@
     addStyle(THUMB_CSS + SEARCH_CSS + PILL_CSS + ' div.sehua-loading { color: #999; font-size: 12px; text-align: center; padding: 8px; }');
     removeUnused();
     if (!document.querySelector('#threadlist li.pbw')) return;   // 空结果页直接退出
+
+    // 拦截重试换过 DOM 后会再进来一次：旧开关、旧分页条、旧状态都要重置
+    document.querySelectorAll('.sehua-forum-switch, .sehua-pager').forEach(el => el.remove());
+    searchPager = null;
+    // URL 带 page 就说明上次读到这儿了，从这页接着读；fetched 单独归零，只用于限流保护
+    const urlPage = Math.max(1, +(new URLSearchParams(location.search).get('page') || 1));
+    Object.assign(searchState, { items: [], page: 1, totalPages: 0, readPages: urlPage, filling: false, paused: false, fetched: 0, error: '' });
+    collectSearchItems();
+    searchState.nextUrl = searchNextUrl(document);
+    searchState.totalPages = searchTotalPages(document);
+
+    // 过滤开关找不到容器（.sttl 结构变了）不该拖累分页条和补齐 —— 两件事互不依赖，
+    // 之前这里 return 会让整套合并分页静默失效
     const bar = addForumSwitches();
-    if (!bar) return;
-    bar.querySelectorAll('input').forEach(cb => cb.addEventListener('change', () => {
+    if (bar) bar.querySelectorAll('input').forEach(cb => cb.addEventListener('change', () => {
+      searchState.page = 1;   // 换过滤条件回到第一页
       applyFilter();
       const st = {}; document.querySelectorAll('.sehua-forum-switch input').forEach(c => st[c.dataset.forum] = c.checked);
       try { localStorage.setItem(FILTER_KEY, JSON.stringify(st)); } catch (e) {}
       loadDetailThumbs();
+      scheduleFill();
     }));
+    mountSearchPager();
     applyFilter();
+    scheduleFill();
     await loadDetailThumbs();
   }
 
-  // ============================ 搜索繁忙 ============================
+  // ============================ 搜索拦截重试 ============================
 
-  // 拦截页倒计时后自动刷新，最多 5 次（计数存 sessionStorage 跨刷新）。
-  // 只认"搜索繁忙"（瞬时繁忙，重试有意义）；"搜索过于频繁…120秒"是冷却，不碰。
-  // 任何页面都先清零计数，避免旧计数跨页面叠加
+  // 拦截页不再整页 reload（那是重新注入脚本、重跑缩略图队列），改成 fetch 当前 URL
+  // 增量换掉结果区。失败原因走 classifySearchFailure：验证码/未登录直接提示不重试，
+  // "等待 N 秒"按原站说的等，HTTP 5xx 看 Retry-After。计数存 sessionStorage 跨刷新累计
+  const showBusyTip = text => {
+    const tip = document.body.appendChild(document.createElement('div'));
+    tip.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,.8);color:#fff;padding:16px 24px;border-radius:8px;font-size:14px;z-index:99999;text-align:center;max-width:80vw;line-height:1.6;';
+    tip.textContent = text;
+    return tip;
+  };
+
+  const countdown = (tip, ms, msg, n) => new Promise(done => {
+    let left = Math.max(1, Math.ceil(ms / 1000));
+    const paint = () => { tip.textContent = `${msg}，${left} 秒后重试（第 ${n}/${MAX_BUSY_RETRY} 次）…`; };
+    paint();
+    const t = setInterval(() => { left -= 1; if (left <= 0) { clearInterval(t); done(); } else paint(); }, 1000);
+  });
+
+  // 彻底失败（或本来就不该重试）时的提示：必须能关掉。
+  // 之前只改文字不移除，一个 fixed + z-index:99999 的黑框会一直盖在页面正中央
+  const dismissTip = (tip, text) => {
+    tip.textContent = text + '（点击关闭）';
+    tip.style.cursor = 'pointer';
+    tip.addEventListener('click', () => tip.remove(), { once: true });
+    setTimeout(() => { if (tip.isConnected) tip.remove(); }, 12000);
+  };
+
+  // 只换 #threadlist 和分页条，页面其余部分与脚本闭包状态都保留
+  function replaceSearchResults(doc) {
+    const fresh = doc && doc.getElementById('threadlist');
+    const old = document.getElementById('threadlist');
+    if (!fresh || !old) return false;
+    old.replaceWith(fresh);
+    const freshPg = doc.querySelector('.pg'), oldPg = document.querySelector('.pg');
+    if (freshPg && oldPg) oldPg.replaceWith(freshPg);
+    return true;
+  }
+
   function searchBusyRetry() {
     if (location.pathname.indexOf('/search.php') === -1) { ss.del(BUSY_KEY); return false; }
+    if (document.querySelector('#threadlist li.pbw')) { ss.del(BUSY_KEY); return false; }   // 有结果就不是拦截页
     const box = document.getElementById('messagetext') || document.querySelector('.alert_error, .alert_info');
-    if (!box || box.textContent.indexOf('搜索繁忙') === -1) { ss.del(BUSY_KEY); return false; }
+    if (!box) { ss.del(BUSY_KEY); return false; }
+
+    const info = classifySearchFailure({ status: 200, headers: '', text: document.body.textContent || '' });
+    if (!info.retry) {
+      ss.del(BUSY_KEY);
+      // 没命中任何拦截特征（正常无结果页）就直接放行，别弹框拦路
+      if (!info.msg || info.msg === '搜索结果页没有结果条目') return false;
+      dismissTip(showBusyTip(''), info.msg);
+      return true;
+    }
     const n = (+ss.get(BUSY_KEY) || 0) + 1;
     if (n > MAX_BUSY_RETRY) { ss.del(BUSY_KEY); return false; }
     ss.set(BUSY_KEY, n);
-    const tip = document.body.appendChild(document.createElement('div'));
-    tip.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,.8);color:#fff;padding:16px 24px;border-radius:8px;font-size:14px;z-index:99999;text-align:center;';
-    let s = 4;
-    tip.textContent = `搜索繁忙，${s} 秒后自动刷新（第 ${n}/${MAX_BUSY_RETRY} 次）...`;
-    const t = setInterval(() => { if (--s > 0) tip.textContent = `搜索繁忙，${s} 秒后自动刷新（第 ${n}/${MAX_BUSY_RETRY} 次）...`; else { clearInterval(t); location.reload(); } }, 1000);
+
+    const tip = showBusyTip('');
+    (async () => {
+      let at = n, cur = info;
+      for (;;) {
+        await countdown(tip, cur.waitMs || 4000, cur.msg || '搜索繁忙', at);
+        tip.textContent = '正在重新请求搜索结果…';
+        const r = await fetchSearchPage(location.href);
+        if (r.ok && replaceSearchResults(r.doc)) {
+          ss.del(BUSY_KEY);
+          tip.remove();
+          searchPageMain();
+          return;
+        }
+        cur = r;
+        at += 1;
+        if (!r.retry) { ss.del(BUSY_KEY); dismissTip(tip, r.msg || '重试失败，请手动刷新'); return; }
+        if (at > MAX_BUSY_RETRY) { ss.del(BUSY_KEY); dismissTip(tip, `${r.msg}，已重试 ${MAX_BUSY_RETRY} 次仍失败`); return; }
+        ss.set(BUSY_KEY, at);
+      }
+    })();
     return true;
   }
 
