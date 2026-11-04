@@ -586,17 +586,25 @@
     for (let i = 0; i < MOBILE_MAX_TRIES && !r; i++) { if (i) await sleep(MOBILE_RETRY_DELAY); r = await fetchMobileThumbs(fid, m ? +m[2] : (+p.get('page') || 1)); }
     const map = r ? r.map : {}, fallback = r ? r.fallback : [], totals = r ? (r.totals || {}) : {};
 
+    const pageTids = [];
     document.querySelectorAll('#threadlisttableid tr').forEach(tr => {
       const tbody = tr.closest('tbody[id^=normalthread_], tbody[id^=stickthread_]'), th = tr.querySelector('th');
       if (!tbody || !th) return;
       relocateDate(tr, th);
       tr.querySelectorAll('td').forEach(td => td.remove());   // 单列化：删掉作者/回复等列
       const tid = (tbody.id.match(/\d+/) || [])[0];
+      if (!tid) return;
+      pageTids.push(tid);
       if (map[tid] && !th.querySelector('.sehua-thumb')) th.appendChild(createThumbWrap(tid, map[tid], totals[tid]));
     });
 
-    // 回捞：移动版有卡无图的帖子，从详情页补图（与检索页共用取图池）
-    if (fallback.length) await loadFallbackThumbs(fallback);
+    // 回捞：移动版有卡无图的帖子，从详情页补图（与检索页共用取图池）。
+    // 再补一类：移动版那一页里压根没有的帖子 —— 移动版和 PC 每页条数对不上，同一个 page 只能
+    // 对上前面一段，页尾那十几帖在 map 里根本不存在，只按 fallback 补永远补不到。
+    // map 全空说明是整个移动版请求失败（不是条数差异），这时不要按整页回捞，
+    // 否则一页会打出几十个详情请求
+    const unmapped = Object.keys(map).length ? pageTids.filter(tid => !map[tid] && !fallback.includes(tid)) : [];
+    if (fallback.length || unmapped.length) await loadFallbackThumbs([...fallback, ...unmapped]);
   }
 
   // ============================ 详情页 ============================
