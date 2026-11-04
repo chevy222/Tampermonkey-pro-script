@@ -44,6 +44,12 @@
   const DETAIL_MAX_TRIES = 2;
   const DETAIL_RETRY_DELAY = 2000;
 
+  // 盖住一页 PC 列表最多取几页移动端（实测 PC 40 条 / 移动 30 条，通常 2 页就够）
+  const MOBILE_PAGE_SPAN_MAX = 3;
+
+  // 移动端每页条数的缓存键：首次数出来之后，翻页/刷新都直接按它换算页码
+  const MOBILE_PER_PAGE_KEY = 'sehuaMobilePerPage';
+
   // 缩略图之间的间距
   const THUMB_GAP = 8;
 
@@ -248,7 +254,8 @@
     ['filter', 'orderby', 'typeid', 'specialtype'].forEach(k => { if (sp.get(k)) pairs.push(k + '=' + encodeURIComponent(sp.get(k))); });
     return gmGet(`https://${location.hostname}/forum-${fid}-${page}.html?${pairs.join('&')}`, text => {
       const map = {}, fallback = [], totals = {};
-      new DOMParser().parseFromString(text, 'text/html').querySelectorAll('.n5_htmk').forEach(el => {
+      const cards = new DOMParser().parseFromString(text, 'text/html').querySelectorAll('.n5_htmk');
+      cards.forEach(el => {
         const tid = (el.querySelector('a[href*=viewthread]')?.href.match(/tid=(\d+)/) || [])[1];
         if (!tid) return;
         const urls = [];
@@ -256,7 +263,8 @@
         const total = +(el.querySelector('.zttpsz')?.textContent || '').trim() || 0;
         if (urls.length) { map[tid] = urls; if (total) totals[tid] = total; } else fallback.push(tid);
       });
-      return { map, fallback, totals };
+      // cards = 这一页移动端给了几张卡（含无图的），用来换算"一页移动端能盖住多少行 PC 列表"
+      return { map, fallback, totals, cards: cards.length };
     });
   };
 
@@ -573,6 +581,19 @@
     th.appendChild(box).appendChild(em);
   }
 
+  // 移动端每页条数：第一次数出来后记住，之后翻页/刷新都直接按它换算页码
+  let mobilePerPage = 0;
+
+  // 一页 PC 列表要取哪几页移动端：两边每页条数不同（实测 PC 40 条 / 移动 30 条），
+  // 按 page 一对一只能盖住前一段，而且差距随页数累积 —— 翻到第 3 页左右就基本全落空了。
+  // 改用「本页第一条在整表里的行号」换算它落在移动端第几页，再取到盖住本页末条为止
+  function mobilePageRange(pcPage, pcCount, perPage) {
+    const firstRow = (pcPage - 1) * pcCount + 1;
+    const a = Math.max(1, Math.floor((firstRow - 1) / perPage) + 1);
+    const b = Math.max(a, Math.floor((firstRow + pcCount - 2) / perPage) + 1);
+    return { a, b: Math.min(b, a + MOBILE_PAGE_SPAN_MAX - 1) };
+  }
+
   async function listPageMain() {
     const m = location.href.match(/forum-(\d+)-(\d+)\.html/), p = new URLSearchParams(location.search);
     const fid = m ? m[1] : p.get('fid');
@@ -581,12 +602,9 @@
     addStyle(THUMB_CSS + PILL_CSS + ' #threadlisttableid { table-layout: fixed !important; width: 100% !important; } #threadlisttableid th { width: 100% !important; padding-right: 12px; }');
     removeUnused();   // 顺带清掉 #autopbn 浮动翻页按钮（见函数注释）
 
-    // 移动版映射：仅被拦（null）才重试，空页不重试
-    let r = null;
-    for (let i = 0; i < MOBILE_MAX_TRIES && !r; i++) { if (i) await sleep(MOBILE_RETRY_DELAY); r = await fetchMobileThumbs(fid, m ? +m[2] : (+p.get('page') || 1)); }
-    const map = r ? r.map : {}, fallback = r ? r.fallback : [], totals = r ? (r.totals || {}) : {};
-
-    const pageTids = [];
+    // 先把行规整好（日期搬到标题下、单列化），顺手记下本页的 tid 顺序。
+    // 换算移动端页码要先知道"本页多少条"，所以取图放到后面
+    const pageTids = [], threadTh = new Map();
     document.querySelectorAll('#threadlisttableid tr').forEach(tr => {
       const tbody = tr.closest('tbody[id^=normalthread_], tbody[id^=stickthread_]'), th = tr.querySelector('th');
       if (!tbody || !th) return;
@@ -595,14 +613,45 @@
       const tid = (tbody.id.match(/\d+/) || [])[0];
       if (!tid) return;
       pageTids.push(tid);
-      if (map[tid] && !th.querySelector('.sehua-thumb')) th.appendChild(createThumbWrap(tid, map[tid], totals[tid]));
+      threadTh.set(tid, th);
+    });
+    if (!pageTids.length) return;
+
+    const pcPage = m ? +m[2] : (+p.get('page') || 1);
+    const map = {}, totals = {}, fallback = [], fetched = new Set();
+
+    // 取一页移动端并并进总表；单页失败不影响其它页
+    const fetchOne = async mp => {
+      if (fetched.has(mp)) return;
+      fetched.add(mp);
+      let r = null;
+      for (let i = 0; i < MOBILE_MAX_TRIES && !r; i++) { if (i) await sleep(MOBILE_RETRY_DELAY); r = await fetchMobileThumbs(fid, mp); }
+      if (!r) return;
+      Object.assign(map, r.map);
+      Object.assign(totals, r.totals || {});
+      r.fallback.forEach(t => { if (!fallback.includes(t)) fallback.push(t); });
+      // 只往上更新：末尾那页卡片本来就少，不能让它把"每页条数"带偏
+      if (r.cards > mobilePerPage) {
+        mobilePerPage = r.cards;
+        try { localStorage.setItem(MOBILE_PER_PAGE_KEY, String(r.cards)); } catch (e) {}
+      }
+    };
+
+    // 还不知道移动端一页几条时，先按老办法取当前页，顺便量出条数
+    if (!mobilePerPage) await fetchOne(pcPage);
+    // 按行号换算：本页第一条落在移动端第几页，一路取到盖住本页末条为止
+    if (mobilePerPage) {
+      const { a, b } = mobilePageRange(pcPage, pageTids.length, mobilePerPage);
+      for (let mp = a; mp <= b; mp++) await fetchOne(mp);
+    }
+
+    pageTids.forEach(tid => {
+      const th = threadTh.get(tid);
+      if (map[tid] && th && !th.querySelector('.sehua-thumb')) th.appendChild(createThumbWrap(tid, map[tid], totals[tid]));
     });
 
-    // 回捞：移动版有卡无图的帖子，从详情页补图（与检索页共用取图池）。
-    // 再补一类：移动版那一页里压根没有的帖子 —— 移动版和 PC 每页条数对不上，同一个 page 只能
-    // 对上前面一段，页尾那十几帖在 map 里根本不存在，只按 fallback 补永远补不到。
-    // map 全空说明是整个移动版请求失败（不是条数差异），这时不要按整页回捞，
-    // 否则一页会打出几十个详情请求
+    // 兜底：移动端确实没给图的（卡片无图 / 换算窗口没盖到）再从详情页补，
+    // 正常情况只会剩个位数，不会像之前那样每页几十个请求
     const unmapped = Object.keys(map).length ? pageTids.filter(tid => !map[tid] && !fallback.includes(tid)) : [];
     if (fallback.length || unmapped.length) await loadFallbackThumbs([...fallback, ...unmapped]);
   }
@@ -1035,6 +1084,8 @@
   function onDomReady() {
     // 队列模式初始化无条件做：没有"新帖瀑布流"导航项的页面也要同步 localStorage 状态
     try { queueEnabled = localStorage.getItem(QUEUE_KEY) !== '0'; } catch (e) {}
+    // 移动端每页条数：上次量到过就直接用，省掉"先取一页探路"的那次请求
+    try { mobilePerPage = +localStorage.getItem(MOBILE_PER_PAGE_KEY) || 0; } catch (e) {}
     // 导航项也可能晚到（站点 AJAX 补导航），开关跟着晚到，别只找一次
     whenPresent(injectQueueSwitch);
 
