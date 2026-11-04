@@ -47,8 +47,8 @@
   // 盖住一页 PC 列表最多取几页移动端（实测 PC 40 条 / 移动 30 条，通常 2 页就够）
   const MOBILE_PAGE_SPAN_MAX = 3;
 
-  // 移动端每页条数的缓存键：首次数出来之后，翻页/刷新都直接按它换算页码
-  const MOBILE_PER_PAGE_KEY = 'sehuaMobilePerPage';
+  // 移动端一页卡片数低于这个值，就当它取到了最后一页，不拿它当"每页条数"
+  const MIN_MOBILE_PAGE = 10;
 
   // 缩略图之间的间距
   const THUMB_GAP = 8;
@@ -581,10 +581,7 @@
     th.appendChild(box).appendChild(em);
   }
 
-  // 移动端每页条数：第一次数出来后记住，之后翻页/刷新都直接按它换算页码
-  let mobilePerPage = 0;
-
-  // 一页 PC 列表要取哪几页移动端：两边每页条数不同（实测 PC 40 条 / 移动 30 条），
+  // 一页 PC 列表要取哪几页移动端：两边每页条数不同时（实测 PC 40 条 / 移动 30 条），
   // 按 page 一对一只能盖住前一段，而且差距随页数累积 —— 翻到第 3 页左右就基本全落空了。
   // 改用「本页第一条在整表里的行号」换算它落在移动端第几页，再取到盖住本页末条为止
   function mobilePageRange(pcPage, pcCount, perPage) {
@@ -619,6 +616,7 @@
 
     const pcPage = m ? +m[2] : (+p.get('page') || 1);
     const map = {}, totals = {}, fallback = [], fetched = new Set();
+    let measured = 0;
 
     // 取一页移动端并并进总表；单页失败不影响其它页
     const fetchOne = async mp => {
@@ -630,19 +628,20 @@
       Object.assign(map, r.map);
       Object.assign(totals, r.totals || {});
       r.fallback.forEach(t => { if (!fallback.includes(t)) fallback.push(t); });
-      // 只往上更新：末尾那页卡片本来就少，不能让它把"每页条数"带偏
-      if (r.cards > mobilePerPage) {
-        mobilePerPage = r.cards;
-        try { localStorage.setItem(MOBILE_PER_PAGE_KEY, String(r.cards)); } catch (e) {}
-      }
+      if (r.cards > measured) measured = r.cards;   // 这一页移动端给了几张卡（最后一页会偏少，取最大值）
     };
 
-    // 还不知道移动端一页几条时，先按老办法取当前页，顺便量出条数
-    if (!mobilePerPage) await fetchOne(pcPage);
-    // 按行号换算：本页第一条落在移动端第几页，一路取到盖住本页末条为止
-    if (mobilePerPage) {
-      const { a, b } = mobilePageRange(pcPage, pageTids.length, mobilePerPage);
+    // 第一轮先按"两边每页条数相同"猜 —— 站点没毛病时就是这个情况，一页只要 1 次请求，
+    // 顺便把移动端真实条数量出来。猜错了（条数有差）就按量到的值重算窗口再来一轮，
+    // 因为窗口最多 3 页，两轮加起来不会超过 3 次请求。不缓存条数：
+    // 站点哪天改回一致、或者又调整了每页条数，下一屏自然就跟上了
+    let perPage = pageTids.length;
+    for (let round = 0; round < 2; round++) {
+      const { a, b } = mobilePageRange(pcPage, pageTids.length, perPage);
       for (let mp = a; mp <= b; mp++) await fetchOne(mp);
+      // 量到的明显偏少说明取到了最后一页，别拿它当每页条数
+      if (!measured || measured === perPage || measured < MIN_MOBILE_PAGE) break;
+      perPage = measured;
     }
 
     pageTids.forEach(tid => {
@@ -1084,8 +1083,6 @@
   function onDomReady() {
     // 队列模式初始化无条件做：没有"新帖瀑布流"导航项的页面也要同步 localStorage 状态
     try { queueEnabled = localStorage.getItem(QUEUE_KEY) !== '0'; } catch (e) {}
-    // 移动端每页条数：上次量到过就直接用，省掉"先取一页探路"的那次请求
-    try { mobilePerPage = +localStorage.getItem(MOBILE_PER_PAGE_KEY) || 0; } catch (e) {}
     // 导航项也可能晚到（站点 AJAX 补导航），开关跟着晚到，别只找一次
     whenPresent(injectQueueSwitch);
 
