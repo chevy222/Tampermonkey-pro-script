@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      5.27
+// @version      5.28
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（默认 4:3 横框，竖图加载完成后切 3:4 竖框，均居中裁切不拉伸；每行最多 5 张；右上角图片总数角标；宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片按队列节奏加载（默认 4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 按筛选结果自动翻页补齐（凑不满一页就往后抓原站，最多 12 页）+ 拦截原因分类重试（验证码/未登录不重试，限频按原站给的等待秒数）；右下角加载进度胶囊（翻页重算，继续补齐累加）。
 // @author       Chevy Yang
 // @match        https://xtsa.wqfj3.com/*
 // @connect      xtsa.wqfj3.com
 // @grant        GM_xmlhttpRequest
+// @run-at       document-idle
 // @noframes
 // ==/UserScript==
 
@@ -16,8 +17,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '5.27') return;
-  document.documentElement.setAttribute('data-sehua', '5.27');
+  if (document.documentElement.getAttribute('data-sehua') === '5.28') return;
+  document.documentElement.setAttribute('data-sehua', '5.28');
 
   // ============================ 可调参数 ============================
 
@@ -310,10 +311,12 @@
   }
 
   // 列队模式开关：插在"新帖瀑布流"导航项（#mn_portal）右边。
-  // queueEnabled 的初始化在 onDomReady 里无条件做——不能依赖本函数，否则没有导航项的页面上开关状态会失效
+  // queueEnabled 的初始化在 onDomReady 里无条件做——不能依赖本函数，否则没有导航项的页面上开关状态会失效。
+  // 返回 true = 已就位（插好了或本来就在），false = 挂载点还没出现，调用方稍后重试
   function injectQueueSwitch() {
+    if (document.getElementById('sehua-queue-switch')) return true;
     const li = document.getElementById('mn_portal');
-    if (!li || document.getElementById('sehua-queue-switch')) return;
+    if (!li) return false;
     const box = document.createElement('li');
     box.id = 'sehua-queue-switch';
     box.innerHTML = '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;user-select:none;color:#fff;font-size:14px;font-weight:700;padding:0 10px;white-space:nowrap;"><input type="checkbox"' + (queueEnabled ? ' checked' : '') + '>队列模式</label>';
@@ -322,6 +325,7 @@
       try { localStorage.setItem(QUEUE_KEY, e.target.checked ? '1' : '0'); } catch (err) {}
       setQueueMode(e.target.checked);
     });
+    return true;
   }
 
   // 让一张图计入胶囊并开始加载：建节点时立即计数（分母一次定型），
@@ -979,15 +983,74 @@
 
   // ============================ 路由 ============================
 
+  // 等目标容器出现再跑：站点有时先返回一个空壳页，正文（列表 / 帖子 / 搜索结果）由它自己的脚本稍后补上。
+  // 老版本这里是一次性判断（`if (!容器) return`），容器晚到就直接放弃、整页失效，
+  // 只能靠用户手动刷新给它第二次机会 —— 这就是"每个页面都要点一下刷新才正常"的来源。
+  // 只重试"等容器"这一步，不整段重跑，避免重复发请求。
+  // 省略 run 时只反复重试 check 本身（check 无副作用就够了）
+  function whenPresent(check, run, tries = 40, gap = 250) {
+    const fire = () => { if (run) run(); };
+    if (check()) { fire(); return; }
+    let n = 0;
+    const tick = () => { if (check()) { fire(); return; } if (++n >= tries) return; setTimeout(tick, gap); };
+    setTimeout(tick, gap);
+  }
+
+  // 站点把正文整块换掉（先给空壳再回填 / document.write 重写）时补跑一次。
+  // 只在"容器换成了另一个节点"时触发，不会自激；重跑本身是幂等的
+  function rearmOnReplace(getEl, rerun, ms = 15000) {
+    const seen = getEl();
+    if (!seen) return;
+    let timer = null, done = false;
+    const obs = new MutationObserver(() => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (done) return;
+        const now = getEl();
+        if (now && now !== seen) { done = true; obs.disconnect(); rerun(); }
+      }, 200);
+    });
+    obs.observe(document.documentElement, { childList: true, subtree: true });
+    setTimeout(() => { done = true; obs.disconnect(); }, ms);
+  }
+
+  // 页面类型只判定一处，boot 与调试信息共用
+  function pageKind() {
+    if (location.pathname.includes('/search.php')) return 'search';
+    if (location.pathname.includes('/thread-') || location.search.includes('mod=viewthread')) return 'detail';
+    if (location.pathname.includes('/forum.php') && !location.search) return 'home';
+    return 'list';
+  }
+
   function onDomReady() {
     // 队列模式初始化无条件做：没有"新帖瀑布流"导航项的页面也要同步 localStorage 状态
     try { queueEnabled = localStorage.getItem(QUEUE_KEY) !== '0'; } catch (e) {}
-    injectQueueSwitch();   // 有"新帖瀑布流"导航项的页面才可见
+    // 导航项也可能晚到（站点 AJAX 补导航），开关跟着晚到，别只找一次
+    whenPresent(injectQueueSwitch);
+
     if (searchBusyRetry()) return;   // 任何页面都先过一遍：非搜索页清零计数，繁忙页进入倒计时
-    if (location.pathname.includes('/search.php')) searchPageMain();
-    else if (location.pathname.includes('/thread-') || location.search.includes('mod=viewthread')) detailPageMain();
-    else if (location.pathname.includes('/forum.php') && !location.search) { addStyle(WIDE_CSS); removeUnused(); }
-    else listPageMain();
+
+    const kind = pageKind();
+    if (kind === 'search') {
+      // 空结果页只有 #messagetext / alert_*，没有 #threadlist —— 这两类都算"已就绪"
+      whenPresent(() => document.getElementById('threadlist') || document.getElementById('messagetext')
+                     || document.querySelector('.alert_error, .alert_info'), searchPageMain);
+    } else if (kind === 'detail') {
+      whenPresent(() => document.getElementById('postlist'), () => {
+        detailPageMain();
+        rearmOnReplace(() => document.getElementById('postlist'), detailPageMain);
+      });
+    } else if (kind === 'home') {
+      addStyle(WIDE_CSS); removeUnused();
+    } else {
+      whenPresent(() => document.getElementById('threadlisttableid'), () => {
+        listPageMain();
+        rearmOnReplace(() => document.getElementById('threadlisttableid'), listPageMain);
+      });
+    }
+
+    // 排查用：脚本没生效时在控制台敲 __sehuaBoot，就知道它跑没跑、当时看到的是什么
+    window.__sehuaBoot = { at: new Date().toISOString(), kind, readyState: document.readyState, version: '5.28' };
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', onDomReady, { once: true });
