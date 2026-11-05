@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      5.33
+// @version      5.34
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（默认 4:3 横框，竖图加载完成后切 3:4 竖框，均居中裁切不拉伸；每行最多 5 张；右上角图片总数角标；宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片按队列节奏加载（默认 4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 按筛选结果自动翻页补齐（凑不满一页就往后抓原站，最多 12 页）+ 拦截原因分类重试（验证码/未登录不重试，限频按原站给的等待秒数）；右下角加载进度胶囊（翻页重算，继续补齐累加）。
 // @author       Chevy Yang
 // @match        https://iqbn.runm5.com/*
@@ -15,8 +15,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '5.33') return;
-  document.documentElement.setAttribute('data-sehua', '5.33');
+  if (document.documentElement.getAttribute('data-sehua') === '5.34') return;
+  document.documentElement.setAttribute('data-sehua', '5.34');
 
   // ============================ 可调参数 ============================
 
@@ -1001,7 +1001,7 @@
   // 除了"怎么找行 / 抓回来往哪塞"，其余全部走上面的共用层。
 
   const guideState = {
-    items: [], page: 1, perPage: 30,
+    items: [], page: 1, perPage: SEARCH_PER_PAGE,
     nextUrl: null, totalPages: 0, readPages: 1,
     filling: false, paused: false, fetched: 0, error: '', expired: false, timer: null
   };
@@ -1125,6 +1125,12 @@
     removeUnused();
 
     document.querySelectorAll('.sehua-forum-switch, .sehua-pager').forEach(el => el.remove());
+    // 上次可能把「发新帖」按钮挪进了自己包的那层 flex 行：拆掉时把按钮放回原位，别越套越深
+    document.querySelectorAll('.sehua-guide-toolbar').forEach(row => {
+      const a = row.querySelector('a[href*="mod=misc"]');
+      if (a && row.parentNode) row.parentNode.insertBefore(a, row);
+      row.remove();
+    });
     guideUi = null;
     const st = guideState;
     Object.assign(st, {
@@ -1135,18 +1141,30 @@
 
     collectGuideItems();
     if (!st.items.length) return;
-    st.perPage = st.items.length;          // 导读页一页多少条，按首屏实际条数量
+    st.perPage = SEARCH_PER_PAGE;          // 跟检索页一致，固定 30 条一页（不再按首屏行数量）
     st.nextUrl = searchNextUrl(document);
     st.totalPages = searchTotalPages(document);
 
-    // 过滤开关：挂在表格上方（导读页没有 .sttl 那一行）
+    // 过滤开关：放到「发新帖」按钮右边；找不到那个按钮才退回表格上方一条。
+    // 用一层 flex 行把按钮和开关框在一起 —— 按钮本身可能是块级 / 浮动，直接插在后面不保证同一行
     const table = st.items[0].el.closest('table');
-    const bar = document.createElement('div');
-    bar.style.cssText = 'display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:10px 0 6px;';
     const wrap = createForumSwitchWrap();
-    bar.appendChild(wrap);
-    if (table && table.parentNode) table.parentNode.insertBefore(bar, table);
-    else document.body.insertBefore(bar, document.body.firstChild);
+    const post = [...document.querySelectorAll('a[href*="mod=misc"]')]
+      .find(a => /发新帖/.test(a.textContent) && /action=nav/.test(a.getAttribute('href') || ''));
+    if (post && post.parentNode) {
+      const row = document.createElement('div');
+      row.className = 'sehua-guide-toolbar';
+      row.style.cssText = 'display:flex;align-items:center;gap:16px;flex-wrap:wrap;';
+      post.parentNode.insertBefore(row, post);
+      row.appendChild(post);
+      row.appendChild(wrap);
+    } else {
+      const bar = document.createElement('div');
+      bar.style.cssText = 'display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:10px 0 6px;';
+      bar.appendChild(wrap);
+      if (table && table.parentNode) table.parentNode.insertBefore(bar, table);
+      else document.body.insertBefore(bar, document.body.firstChild);
+    }
     wrap.querySelectorAll('input').forEach(cb => cb.addEventListener('change', () => {
       st.page = 1;
       saveForumSwitchState();
