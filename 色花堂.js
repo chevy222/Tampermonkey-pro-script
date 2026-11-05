@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      5.31
+// @version      5.32
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（默认 4:3 横框，竖图加载完成后切 3:4 竖框，均居中裁切不拉伸；每行最多 5 张；右上角图片总数角标；宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片按队列节奏加载（默认 4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 按筛选结果自动翻页补齐（凑不满一页就往后抓原站，最多 12 页）+ 拦截原因分类重试（验证码/未登录不重试，限频按原站给的等待秒数）；右下角加载进度胶囊（翻页重算，继续补齐累加）。
 // @author       Chevy Yang
 // @match        https://iqbn.runm5.com/*
@@ -15,8 +15,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '5.31') return;
-  document.documentElement.setAttribute('data-sehua', '5.31');
+  if (document.documentElement.getAttribute('data-sehua') === '5.32') return;
+  document.documentElement.setAttribute('data-sehua', '5.32');
 
   // ============================ 可调参数 ============================
 
@@ -131,10 +131,14 @@
 
   // ============================ 网络请求 ============================
 
-  // 带移动 UA 的 GET；被 safeid 挑战页拦下或解析抛错都返回 null
+  // 带移动 UA 的 GET；被 safeid 挑战页拦下或解析抛错都返回 null。
+  // 只改 UA 切触屏模板，不要在这里设 Cookie：GM_xmlhttpRequest 对 Cookie 是整条替换
+  // 而不是追加，写一个 'mobile=2' 会把登录态（cdb_sid 等）一起顶掉，移动版列表和详情回捞
+  // 就都成了游客请求 —— 登录用户浏览 filter=author 时，PC 是"我发的帖"、移动版返回全版列表，
+  // 两边根本不是同一批帖子，缩略图自然对不上。模板切换靠 URL 上的 ?mobile=2 就够了
   const gmGet = (url, parse) => new Promise(resolve => GM_xmlhttpRequest({
     url, timeout: REQUEST_TIMEOUT,
-    headers: { 'User-Agent': MOBILE_UA, 'Cookie': 'mobile=2' },
+    headers: { 'User-Agent': MOBILE_UA },
     onload: resp => { try { resolve(resp.responseText.includes('safeid') ? null : parse(resp.responseText)); } catch (e) { resolve(null); } },
     ontimeout: () => resolve(null), onerror: () => resolve(null)
   }));
