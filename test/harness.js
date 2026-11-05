@@ -9,9 +9,6 @@ window.runTest = async (name) => {
   // 加时间戳防浏览器缓存：否则"回滚代码跑旧断言"这类验证会拿到缓存里的新源码，结论全假
   const SRC_SEHUA = await (await fetch('/sehua.js?t=' + Date.now())).text();
   const SRC_T2048 = await (await fetch('/t2048.js?t=' + Date.now())).text();
-  // 版本号从源码里读，避免每次升版都让"哨兵已占位"这类断言假红
-  const VER_SEHUA = (/@version\s+(\S+)/.exec(SRC_SEHUA) || [])[1];
-  const VER_T2048 = (/@version\s+(\S+)/.exec(SRC_T2048) || [])[1];
 
   // ---- 罐装 XHR 响应（色花堂）----
   // isPlaceholder 判据专用：201 是 query 带扩展名、202 是纯数字路径（都无扩展名），203 是站内截断坏址
@@ -99,14 +96,7 @@ window.runTest = async (name) => {
         ok('回捞 URL 指向 102', /tid=102/.test(calls[1] || ''));
         ok('101 显示图片总数角标 7', (() => { const n = d.querySelector('#normalthread_101 .sehua-num'); return !!n && n.textContent === '7'; })());
         ok('102（无总数）不显示角标', !d.querySelector('#normalthread_102 .sehua-num'));
-        // 比例由伪元素的百分比 padding 撑（f879ed7 之后不再用 aspect-ratio），
-        // 所以量盒子实际高宽比，而不是读被弃用的 aspect-ratio 计算值
-        ok('缩略图按方向选框（方图/横图归 4:3 横框 cover）', (() => {
-          const i = d.querySelector('#normalthread_101 .sehua-thumb img'); const a = i && i.closest('a');
-          if (!a) return false;
-          const r = a.getBoundingClientRect();
-          return r.width > 0 && Math.abs(r.height / r.width - 0.75) < 0.02 && getComputedStyle(i).objectFit === 'cover';
-        })());
+        ok('缩略图按方向选框（方图/横图归 4:3 横框 cover）', (() => { const i = d.querySelector('#normalthread_101 .sehua-thumb img'); const a = i && i.closest('a'); return !!a && getComputedStyle(a).aspectRatio.replace(/\s/g, '') === '4/3' && getComputedStyle(i).objectFit === 'cover'; })());
         ok('101 img 保留 data-original 且与 src 同址', (() => { const i = d.querySelector('#normalthread_101 .sehua-thumb img'); return !!i && i.getAttribute('data-original') === i.getAttribute('src'); })());
         ok('101 img 带 lazy imagelist 类', (() => { const i = d.querySelector('#normalthread_101 .sehua-thumb img'); return !!i && /lazy/.test(i.className) && /imagelist/.test(i.className); })());
         ok('胶囊出现并计数', pillLog.some(p => /^缩略图：成功 \d+( · 等待 \d+)?( · 失败 \d+)? · 共 \d+$/.test(p.text)));
@@ -310,22 +300,6 @@ window.runTest = async (name) => {
         ok('切换后状态更新', !!saved2 && saved2['求片问答悬赏区'] === false);
       }
     },
-    'sehua-search-stale': {
-      src: SRC_SEHUA, wait: 100, clear: true,
-      preset: () => localStorage.setItem('sehuaFilterState', JSON.stringify({ '求片问答悬赏区': false })),
-      gm: [{ re: /mod=viewthread&tid=(\d+)/, html: DETAIL_HTML, delay: 400 }],
-      assert: async ({ ok, d, calls, sleep }) => {
-        ok('过滤前两个可见帖子都开始取图', calls.length === 2 && calls.some(u => /tid=201/.test(u)) && calls.some(u => /tid=202/.test(u)));
-        const cb201 = [...d.querySelectorAll('.sehua-forum-switch input')].find(i => i.dataset.forum === '求片问答悬赏区');
-        cb201.checked = true;
-        cb201.dispatchEvent(new Event('change', { bubbles: true }));
-        await sleep(1200);
-        ok('请求途中隐藏的条目被过滤', d.getElementById('thread201').style.display === 'none');
-        ok('旧请求迟到后不注入隐藏条目', !d.getElementById('thread201').querySelector('.sehua-thumb') && !d.getElementById('thread201').dataset.sehuaChecked);
-        ok('仍然可见的条目正常复用迟到结果', d.getElementById('thread202').querySelectorAll('.sehua-thumb img').length === 2);
-        ok('可见条目没有重复请求', calls.length === 2);
-      }
-    },
     'sehua-filter': {
       src: SRC_SEHUA, wait: 2500,
       gm: [
@@ -375,7 +349,7 @@ window.runTest = async (name) => {
       ],
       assert: ({ ok, d, calls }) => {
         const total = d.querySelectorAll('.sehua-thumb img').length;
-        ok('哨兵占位', d.documentElement.getAttribute('data-sehua') === VER_SEHUA);
+        ok('哨兵占位', d.documentElement.getAttribute('data-sehua') === '5.19');
         ok('双跑第二次被哨兵拦截', calls.length === 3);
         ok('GM 共 3 次（1 映射 + 2 回捞，无重复请求）', calls.length === 3 && calls.some(u => /tid=102/.test(u)) && calls.some(u => /tid=107/.test(u)));
         ok('双跑不重复注入（仍 6 张）', total === 6);
@@ -588,7 +562,7 @@ window.runTest = async (name) => {
         ok('列表页锚点补 target=_blank', d.querySelector('#threadlist a').target === '_blank');
         ok('eager 先于 src 赋值', srcLog.every(e => e[0] === 'eager'));
         ok('胶囊完成 成功 2 · 共 2（无失败无等待时不显示）', pillLog.some(p => /^缩略图：成功 2 · 共 2$/.test(p.text)));
-        ok('哨兵已占位', d.documentElement.getAttribute('data-t2048') === VER_T2048);
+        ok('哨兵已占位', d.documentElement.getAttribute('data-t2048') === '5.4');
         const styleCount = [...d.querySelectorAll('style')].filter(s => s.textContent.indexOf('thumb-progress') !== -1).length;
         ok('双跑只注入一份样式', styleCount === 1);
       }
@@ -596,7 +570,7 @@ window.runTest = async (name) => {
     't2048-read': {
       src: SRC_T2048, wait: 3000, pillId: 'thumb-progress', watchPill: true, observerTest: true,
       assert: async ({ ok, d, pillLog, sleep }) => {
-        // 先等胶囊淡出节点移除，避开后续断言的时序撞车
+        // 先等胶囊淡出节点移除（它自身也是 DOM 变动，会连带触发一次 sweep），避开时序撞车
         await sleep(1600);
         const imgs = d.querySelectorAll('#postlist img');
         const placeholders = [...imgs].slice(0, 5);
@@ -648,17 +622,16 @@ window.runTest = async (name) => {
   if (sc.gm) {
     window.GM_xmlhttpRequest = o => {
       calls.push(o.url);
-      let text = null, delay = 0;
+      let text = null;
       for (const h of sc.gm) {
         const m = o.url.match(h.re);
         if (m) {
           if (h.hang) return;   // 永不回调：模拟 TM 请求"连接后挂起"（onTimeout 失效）
           text = (typeof h.html === 'function' ? h.html(m) : h.html);
-          delay = h.delay || 0;
           break;
         }
       }
-      setTimeout(() => { if (text === null) o.onerror(); else o.onload({ responseText: text }); }, delay);
+      setTimeout(() => { if (text === null) o.onerror(); else o.onload({ responseText: text }); }, 0);
     };
   }
   let srcLog = [];

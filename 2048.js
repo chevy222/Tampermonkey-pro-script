@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048
 // @namespace    https://fby.hfz300.com/
-// @version      5.6
+// @version      5.5
 // @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；检索页高级搜索「所在版块」默认选中「國內原創」；去懒加载——列表原生 lazy 与详情页占位图（data-original/data-src）一律立即加载，防抖观察者只接管 AJAX 新插入的图（不监听属性变更）；图片加载队列（10 张/秒、在途≤10、首屏突发 10），列表页"搜索"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；右下角加载进度胶囊。
 // @author       Chevy Yang
 // @match        https://bbs.hdaksog.com/*
@@ -37,8 +37,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-t2048') === '5.6') return;
-  document.documentElement.setAttribute('data-t2048', '5.6');
+  if (document.documentElement.getAttribute('data-t2048') === '5.5') return;
+  document.documentElement.setAttribute('data-t2048', '5.5');
 
   // ============================ 样式 ============================
 
@@ -87,13 +87,12 @@
   }
 
   // 队列模式开关：插在列表页顶部"搜索"导航项右边。
-  // queueEnabled 初始化在启动处无条件做，不能依赖本函数。
-  // 返回 true = 已就位（插好了或本来就在），false = "搜索"入口还没出现，调用方稍后重试
+  // queueEnabled 初始化在启动处无条件做，不能依赖本函数
   function injectQueueSwitch() {
-    if (document.getElementById('t2048-queue-switch')) return true;
+    if (document.getElementById('t2048-queue-switch')) return;
     const link = [...document.querySelectorAll('a')].find(a => (a.textContent || '').trim() === '搜索' && a.getBoundingClientRect().width > 0);
     const li = link && link.closest('li');
-    if (!li) return false;
+    if (!li) return;
     const box = document.createElement('li');
     box.id = 't2048-queue-switch';
     box.innerHTML = '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;user-select:none;color:#fff;font-size:14px;font-weight:700;padding:0 10px;white-space:nowrap;"><input type="checkbox"' + (queueEnabled ? ' checked' : '') + '>队列模式</label>';
@@ -102,7 +101,6 @@
       try { localStorage.setItem(QUEUE_KEY, e.target.checked ? '1' : '0'); } catch (err) {}
       setQueueMode(e.target.checked);
     });
-    return true;
   }
 
   // 让一张图计入胶囊并按队列模式开始加载；action=实际触发加载的动作（设 src / 改 loading）
@@ -260,22 +258,20 @@
 
   // 高级搜索面板的「所在版块」默认选中国内原创（fid=15）。
   // 只在用户未做选择（值 all/空）时改一次：页面重载后恢复默认，
-  // 但用户手动改选（含切回"全部版块分类"）后脚本不再插手。
-  // 返回 true = 已处理完（改好了 / 不需要改 / 没有这项），false = 面板还没出来，可稍后重试
+  // 但用户手动改选（含切回"全部版块分类"）后脚本不再插手
   function applyDefaultSearchBoard() {
-    if (location.pathname.indexOf('/search.php') === -1) return true;
+    if (location.pathname.indexOf('/search.php') === -1) return;
     const panel = document.getElementById('advanced_search');
     const sel = (panel || document).querySelector('select[name="f_fid"]');
-    if (!sel) return false;                          // 面板还没渲染，稍后再看
-    if (sel.value && sel.value !== 'all') return true;   // 已有选择（含 bfcache 恢复）就不动
+    if (!sel) return;
+    if (sel.value && sel.value !== 'all') return;   // 已有选择（含 bfcache 恢复）就不动
     const options = [...sel.options];
     // 优先按 value 命中；站方改编号时按繁体/简体文本兜底
     const opt = options.find(o => o.value === '15')
              || options.find(o => /國內原創|国内原创/.test(o.textContent));
-    if (!opt) return true;                           // 面板在、但没有这项：重试也没用
+    if (!opt) return;
     sel.value = opt.value;
     sel.dispatchEvent(new Event('change', { bubbles: true }));   // 无 onchange 绑定，派发只为兼容后续联动
-    return true;
   }
 
   // ============================ 启动 ============================
@@ -290,30 +286,12 @@
     debounceTimer = setTimeout(() => processRoot(document), OBSERVE_DEBOUNCE);
   }
 
-  // 只处理站点新增的内容元素；胶囊和队列开关自身的 DOM 变化不再触发全文档补扫
-  new MutationObserver(mutations => {
-    const hasNewContent = mutations.some(m => [...m.addedNodes].some(n =>
-      n.nodeType === 1 && !n.closest('#thumb-progress, #t2048-queue-switch')
-    ));
-    if (hasNewContent) scheduleProcess();
-  }).observe(document.documentElement, { childList: true, subtree: true });
-
-  // 一次性初始化：站点可能先给空壳页，导航和高级搜索面板稍后才补上，
-  // 所以"挂载点还没出现"时有限次重试，而不是只在启动那一瞬间找一次。
-  // 老版本是单次调用，元素晚到就永久缺失 —— 表现就是"刷新一下才正常"
-  function retryUntil(fn, tries = 40, gap = 250) {
-    if (fn()) return;
-    let n = 0;
-    const tick = () => { if (fn() || ++n >= tries) return; setTimeout(tick, gap); };
-    setTimeout(tick, gap);
-  }
+  // 站点 AJAX 插入新帖子行时扫描新图；src 已在初始全扫时设好，不监听属性变化
+  new MutationObserver(scheduleProcess).observe(document.documentElement, { childList: true, subtree: true });
 
   // 队列模式初始化（无条件，不能依赖开关是否渲染出来）+ 注入开关
   try { queueEnabled = localStorage.getItem(QUEUE_KEY) !== '0'; } catch (e) {}
-  retryUntil(injectQueueSwitch);
-  retryUntil(applyDefaultSearchBoard);   // 仅检索页会真的动手
-  processRoot(document);                 // 广告与懒图之后由 MutationObserver 持续补扫
-
-  // 排查用：脚本没生效时在控制台敲 __t2048Boot，就知道它跑没跑、当时看到的是什么
-  window.__t2048Boot = { at: new Date().toISOString(), readyState: document.readyState, version: '5.6' };
+  injectQueueSwitch();
+  applyDefaultSearchBoard();   // 仅检索页生效；只做一次，不挂观察者
+  processRoot(document);
 })();

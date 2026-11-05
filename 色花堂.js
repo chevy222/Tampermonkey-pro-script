@@ -1,12 +1,11 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      5.29
+// @version      5.27
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（默认 4:3 横框，竖图加载完成后切 3:4 竖框，均居中裁切不拉伸；每行最多 5 张；右上角图片总数角标；宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片按队列节奏加载（默认 4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 按筛选结果自动翻页补齐（凑不满一页就往后抓原站，最多 12 页）+ 拦截原因分类重试（验证码/未登录不重试，限频按原站给的等待秒数）；右下角加载进度胶囊（翻页重算，继续补齐累加）。
 // @author       Chevy Yang
 // @match        https://iqbn.runm5.com/*
 // @grant        GM_xmlhttpRequest
-// @run-at       document-idle
 // @noframes
 // ==/UserScript==
 
@@ -16,8 +15,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '5.29') return;
-  document.documentElement.setAttribute('data-sehua', '5.29');
+  if (document.documentElement.getAttribute('data-sehua') === '5.27') return;
+  document.documentElement.setAttribute('data-sehua', '5.27');
 
   // ============================ 可调参数 ============================
 
@@ -43,12 +42,6 @@
   // 详情页取图的请求次数上限（含首次）与退避间隔
   const DETAIL_MAX_TRIES = 2;
   const DETAIL_RETRY_DELAY = 2000;
-
-  // 盖住一页 PC 列表最多取几页移动端（实测 PC 40 条 / 移动 30 条，通常 2 页就够）
-  const MOBILE_PAGE_SPAN_MAX = 3;
-
-  // 移动端一页卡片数低于这个值，就当它取到了最后一页，不拿它当"每页条数"
-  const MIN_MOBILE_PAGE = 10;
 
   // 缩略图之间的间距
   const THUMB_GAP = 8;
@@ -133,13 +126,10 @@
 
   // ============================ 网络请求 ============================
 
-  // 带移动 UA 的 GET；被 safeid 挑战页拦下或解析抛错都返回 null。
-  // 只改 UA 切触屏模板，不要在这里设 Cookie：GM_xmlhttpRequest 对 Cookie 是整条替换
-  // 而不是追加，写一个 'mobile=2' 会把登录态（cdb_sid 等）一起顶掉，回捞就成了游客请求。
-  // 模板切换本来就靠 URL 上的 ?mobile=2，那个头纯属多余（v5.29 移除）
+  // 带移动 UA 的 GET；被 safeid 挑战页拦下或解析抛错都返回 null
   const gmGet = (url, parse) => new Promise(resolve => GM_xmlhttpRequest({
     url, timeout: REQUEST_TIMEOUT,
-    headers: { 'User-Agent': MOBILE_UA },
+    headers: { 'User-Agent': MOBILE_UA, 'Cookie': 'mobile=2' },
     onload: resp => { try { resolve(resp.responseText.includes('safeid') ? null : parse(resp.responseText)); } catch (e) { resolve(null); } },
     ontimeout: () => resolve(null), onerror: () => resolve(null)
   }));
@@ -254,8 +244,7 @@
     ['filter', 'orderby', 'typeid', 'specialtype'].forEach(k => { if (sp.get(k)) pairs.push(k + '=' + encodeURIComponent(sp.get(k))); });
     return gmGet(`https://${location.hostname}/forum-${fid}-${page}.html?${pairs.join('&')}`, text => {
       const map = {}, fallback = [], totals = {};
-      const cards = new DOMParser().parseFromString(text, 'text/html').querySelectorAll('.n5_htmk');
-      cards.forEach(el => {
+      new DOMParser().parseFromString(text, 'text/html').querySelectorAll('.n5_htmk').forEach(el => {
         const tid = (el.querySelector('a[href*=viewthread]')?.href.match(/tid=(\d+)/) || [])[1];
         if (!tid) return;
         const urls = [];
@@ -263,8 +252,7 @@
         const total = +(el.querySelector('.zttpsz')?.textContent || '').trim() || 0;
         if (urls.length) { map[tid] = urls; if (total) totals[tid] = total; } else fallback.push(tid);
       });
-      // cards = 这一页移动端给了几张卡（含无图的），用来换算"一页移动端能盖住多少行 PC 列表"
-      return { map, fallback, totals, cards: cards.length };
+      return { map, fallback, totals };
     });
   };
 
@@ -321,12 +309,10 @@
   }
 
   // 列队模式开关：插在"新帖瀑布流"导航项（#mn_portal）右边。
-  // queueEnabled 的初始化在 onDomReady 里无条件做——不能依赖本函数，否则没有导航项的页面上开关状态会失效。
-  // 返回 true = 已就位（插好了或本来就在），false = 挂载点还没出现，调用方稍后重试
+  // queueEnabled 的初始化在 onDomReady 里无条件做——不能依赖本函数，否则没有导航项的页面上开关状态会失效
   function injectQueueSwitch() {
-    if (document.getElementById('sehua-queue-switch')) return true;
     const li = document.getElementById('mn_portal');
-    if (!li) return false;
+    if (!li || document.getElementById('sehua-queue-switch')) return;
     const box = document.createElement('li');
     box.id = 'sehua-queue-switch';
     box.innerHTML = '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;user-select:none;color:#fff;font-size:14px;font-weight:700;padding:0 10px;white-space:nowrap;"><input type="checkbox"' + (queueEnabled ? ' checked' : '') + '>队列模式</label>';
@@ -335,7 +321,6 @@
       try { localStorage.setItem(QUEUE_KEY, e.target.checked ? '1' : '0'); } catch (err) {}
       setQueueMode(e.target.checked);
     });
-    return true;
   }
 
   // 让一张图计入胶囊并开始加载：建节点时立即计数（分母一次定型），
@@ -581,16 +566,6 @@
     th.appendChild(box).appendChild(em);
   }
 
-  // 一页 PC 列表要取哪几页移动端：两边每页条数不同时（实测 PC 40 条 / 移动 30 条），
-  // 按 page 一对一只能盖住前一段，而且差距随页数累积 —— 翻到第 3 页左右就基本全落空了。
-  // 改用「本页第一条在整表里的行号」换算它落在移动端第几页，再取到盖住本页末条为止
-  function mobilePageRange(pcPage, pcCount, perPage) {
-    const firstRow = (pcPage - 1) * pcCount + 1;
-    const a = Math.max(1, Math.floor((firstRow - 1) / perPage) + 1);
-    const b = Math.max(a, Math.floor((firstRow + pcCount - 2) / perPage) + 1);
-    return { a, b: Math.min(b, a + MOBILE_PAGE_SPAN_MAX - 1) };
-  }
-
   async function listPageMain() {
     const m = location.href.match(/forum-(\d+)-(\d+)\.html/), p = new URLSearchParams(location.search);
     const fid = m ? m[1] : p.get('fid');
@@ -599,60 +574,22 @@
     addStyle(THUMB_CSS + PILL_CSS + ' #threadlisttableid { table-layout: fixed !important; width: 100% !important; } #threadlisttableid th { width: 100% !important; padding-right: 12px; }');
     removeUnused();   // 顺带清掉 #autopbn 浮动翻页按钮（见函数注释）
 
-    // 先把行规整好（日期搬到标题下、单列化），顺手记下本页的 tid 顺序。
-    // 换算移动端页码要先知道"本页多少条"，所以取图放到后面
-    const pageTids = [], threadTh = new Map();
+    // 移动版映射：仅被拦（null）才重试，空页不重试
+    let r = null;
+    for (let i = 0; i < MOBILE_MAX_TRIES && !r; i++) { if (i) await sleep(MOBILE_RETRY_DELAY); r = await fetchMobileThumbs(fid, m ? +m[2] : (+p.get('page') || 1)); }
+    const map = r ? r.map : {}, fallback = r ? r.fallback : [], totals = r ? (r.totals || {}) : {};
+
     document.querySelectorAll('#threadlisttableid tr').forEach(tr => {
       const tbody = tr.closest('tbody[id^=normalthread_], tbody[id^=stickthread_]'), th = tr.querySelector('th');
       if (!tbody || !th) return;
       relocateDate(tr, th);
       tr.querySelectorAll('td').forEach(td => td.remove());   // 单列化：删掉作者/回复等列
       const tid = (tbody.id.match(/\d+/) || [])[0];
-      if (!tid) return;
-      pageTids.push(tid);
-      threadTh.set(tid, th);
-    });
-    if (!pageTids.length) return;
-
-    const pcPage = m ? +m[2] : (+p.get('page') || 1);
-    const map = {}, totals = {}, fallback = [], fetched = new Set();
-    let measured = 0;
-
-    // 取一页移动端并并进总表；单页失败不影响其它页
-    const fetchOne = async mp => {
-      if (fetched.has(mp)) return;
-      fetched.add(mp);
-      let r = null;
-      for (let i = 0; i < MOBILE_MAX_TRIES && !r; i++) { if (i) await sleep(MOBILE_RETRY_DELAY); r = await fetchMobileThumbs(fid, mp); }
-      if (!r) return;
-      Object.assign(map, r.map);
-      Object.assign(totals, r.totals || {});
-      r.fallback.forEach(t => { if (!fallback.includes(t)) fallback.push(t); });
-      if (r.cards > measured) measured = r.cards;   // 这一页移动端给了几张卡（最后一页会偏少，取最大值）
-    };
-
-    // 第一轮先按"两边每页条数相同"猜 —— 站点没毛病时就是这个情况，一页只要 1 次请求，
-    // 顺便把移动端真实条数量出来。猜错了（条数有差）就按量到的值重算窗口再来一轮。
-    // 请求数是 1 + 窗口页数（窗口上限 3，探路那页若落在窗口外就多一次），最多 4 次。
-    // 不缓存条数：站点哪天改回一致、或者又调整了每页条数，下一屏自然就跟上了
-    let perPage = pageTids.length;
-    for (let round = 0; round < 2; round++) {
-      const { a, b } = mobilePageRange(pcPage, pageTids.length, perPage);
-      for (let mp = a; mp <= b; mp++) await fetchOne(mp);
-      // 量到的明显偏少说明取到了最后一页，别拿它当每页条数
-      if (!measured || measured === perPage || measured < MIN_MOBILE_PAGE) break;
-      perPage = measured;
-    }
-
-    pageTids.forEach(tid => {
-      const th = threadTh.get(tid);
-      if (map[tid] && th && !th.querySelector('.sehua-thumb')) th.appendChild(createThumbWrap(tid, map[tid], totals[tid]));
+      if (map[tid] && !th.querySelector('.sehua-thumb')) th.appendChild(createThumbWrap(tid, map[tid], totals[tid]));
     });
 
-    // 兜底：移动端确实没给图的（卡片无图 / 换算窗口没盖到）再从详情页补，
-    // 正常情况只会剩个位数，不会像之前那样每页几十个请求
-    const unmapped = Object.keys(map).length ? pageTids.filter(tid => !map[tid] && !fallback.includes(tid)) : [];
-    if (fallback.length || unmapped.length) await loadFallbackThumbs([...fallback, ...unmapped]);
+    // 回捞：移动版有卡无图的帖子，从详情页补图（与检索页共用取图池）
+    if (fallback.length) await loadFallbackThumbs(fallback);
   }
 
   // ============================ 详情页 ============================
@@ -697,6 +634,7 @@
     totalPages: 0,    // 原站一共多少页（从分页条最大页码推）
     readPages: 1,     // 已经读到原站第几页，刷新后从这页继续
     filling: false,
+    paused: false,
     fetched: 0,       // 本轮已经补抓了几页（只管限流保护，点「继续补齐」会清零）
     error: '',
     expired: false    // 搜索快照失效：重试没意义，只能重新搜索
@@ -747,7 +685,7 @@
     more.addEventListener('click', () => {
       // 快照失效后重试同一个 searchmd5 没用，只能拿同一个关键词重新发起一次搜索
       if (searchState.expired) { reSearchFromCurrent(); return; }
-      searchState.error = ''; searchState.fetched = 0;
+      searchState.paused = false; searchState.error = ''; searchState.fetched = 0;
       scheduleFill(); updateSearchPager();
     });
     bar.append(prev, next, more, label);
@@ -815,6 +753,7 @@
     // 补到单轮上限时 scheduleFill 已经不排定时器了，必须单独说明，
     // 否则会一直显示"正在补齐"却一个请求都不发
     else if (st.fetched >= SEARCH_FILL_MAX) tail = `本轮已补 ${SEARCH_FILL_MAX} 页，点「继续补齐」再抓`;
+    else if (st.paused) tail = '已暂停补齐';
     else tail = '5 秒后继续补齐…';   // 这个状态只是在等定时器，并没有发请求
     const totalTxt = st.totalPages ? ` / ${st.totalPages}` : '';
     label.textContent = `第 ${st.page} 页 · 本页 ${shown} / ${SEARCH_PER_PAGE} 条 · 筛选后共 ${matched} 条 · 已读原站 ${st.readPages}${totalTxt} 页 · ${tail}`;
@@ -828,7 +767,7 @@
   function scheduleFill() {
     clearTimeout(fillTimer);
     const st = searchState;
-    if (st.filling || !st.nextUrl) return;
+    if (st.filling || st.paused || !st.nextUrl) return;
     if (st.fetched >= SEARCH_FILL_MAX) return;
     if (st.items.filter(it => it.matches).length >= st.page * SEARCH_PER_PAGE) return;
     fillTimer = setTimeout(fillNextPage, SEARCH_FILL_GAP);
@@ -836,7 +775,7 @@
 
   async function fillNextPage() {
     const st = searchState;
-    if (st.filling || !st.nextUrl) return;
+    if (st.filling || st.paused || !st.nextUrl) return;
     st.filling = true;
     updateSearchPager();
     let r;
@@ -886,12 +825,10 @@
     await Promise.all(Array.from({ length: MAX_CONCURRENT }, async () => {
       while (i < tasks.length) {
         const task = tasks[i++];
-        if (!task.target.isConnected || task.target.style.display === 'none') continue;
         const tip = task.target.appendChild(Object.assign(document.createElement('div'), { className: 'sehua-loading', textContent: '加载中...' }));
         try {
           const urls = await fetchDetailImages(task.tid);
-          // 翻页/过滤后，旧页仍在飞的请求不得再注入或计入新页；仍可见的条目照常复用结果
-          if (!task.target.isConnected || task.target.style.display === 'none' || urls === null) continue;
+          if (urls === null) continue;                  // 被拦：不标记，下次刷新再试
           task.target.dataset.sehuaChecked = '1';
           if (urls.length && !task.target.querySelector('.sehua-thumb')) {
             task.target.appendChild(createThumbWrap(task.tid, urls));
@@ -937,7 +874,7 @@
     searchPager = null;
     // URL 带 page 就说明上次读到这儿了，从这页接着读；fetched 单独归零，只用于限流保护
     const urlPage = Math.max(1, +(new URLSearchParams(location.search).get('page') || 1));
-    Object.assign(searchState, { items: [], page: 1, totalPages: 0, readPages: urlPage, filling: false, fetched: 0, error: '' });
+    Object.assign(searchState, { items: [], page: 1, totalPages: 0, readPages: urlPage, filling: false, paused: false, fetched: 0, error: '' });
     collectSearchItems();
     searchState.nextUrl = searchNextUrl(document);
     searchState.totalPages = searchTotalPages(document);
@@ -1041,74 +978,15 @@
 
   // ============================ 路由 ============================
 
-  // 等目标容器出现再跑：站点有时先返回一个空壳页，正文（列表 / 帖子 / 搜索结果）由它自己的脚本稍后补上。
-  // 老版本这里是一次性判断（`if (!容器) return`），容器晚到就直接放弃、整页失效，
-  // 只能靠用户手动刷新给它第二次机会 —— 这就是"每个页面都要点一下刷新才正常"的来源。
-  // 只重试"等容器"这一步，不整段重跑，避免重复发请求。
-  // 省略 run 时只反复重试 check 本身（check 无副作用就够了）
-  function whenPresent(check, run, tries = 40, gap = 250) {
-    const fire = () => { if (run) run(); };
-    if (check()) { fire(); return; }
-    let n = 0;
-    const tick = () => { if (check()) { fire(); return; } if (++n >= tries) return; setTimeout(tick, gap); };
-    setTimeout(tick, gap);
-  }
-
-  // 站点把正文整块换掉（先给空壳再回填 / document.write 重写）时补跑一次。
-  // 只在"容器换成了另一个节点"时触发，不会自激；重跑本身是幂等的
-  function rearmOnReplace(getEl, rerun, ms = 15000) {
-    const seen = getEl();
-    if (!seen) return;
-    let timer = null, done = false;
-    const obs = new MutationObserver(() => {
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        if (done) return;
-        const now = getEl();
-        if (now && now !== seen) { done = true; obs.disconnect(); rerun(); }
-      }, 200);
-    });
-    obs.observe(document.documentElement, { childList: true, subtree: true });
-    setTimeout(() => { done = true; obs.disconnect(); }, ms);
-  }
-
-  // 页面类型只判定一处，boot 与调试信息共用
-  function pageKind() {
-    if (location.pathname.includes('/search.php')) return 'search';
-    if (location.pathname.includes('/thread-') || location.search.includes('mod=viewthread')) return 'detail';
-    if (location.pathname.includes('/forum.php') && !location.search) return 'home';
-    return 'list';
-  }
-
   function onDomReady() {
     // 队列模式初始化无条件做：没有"新帖瀑布流"导航项的页面也要同步 localStorage 状态
     try { queueEnabled = localStorage.getItem(QUEUE_KEY) !== '0'; } catch (e) {}
-    // 导航项也可能晚到（站点 AJAX 补导航），开关跟着晚到，别只找一次
-    whenPresent(injectQueueSwitch);
-
+    injectQueueSwitch();   // 有"新帖瀑布流"导航项的页面才可见
     if (searchBusyRetry()) return;   // 任何页面都先过一遍：非搜索页清零计数，繁忙页进入倒计时
-
-    const kind = pageKind();
-    if (kind === 'search') {
-      // 空结果页只有 #messagetext / alert_*，没有 #threadlist —— 这两类都算"已就绪"
-      whenPresent(() => document.getElementById('threadlist') || document.getElementById('messagetext')
-                     || document.querySelector('.alert_error, .alert_info'), searchPageMain);
-    } else if (kind === 'detail') {
-      whenPresent(() => document.getElementById('postlist'), () => {
-        detailPageMain();
-        rearmOnReplace(() => document.getElementById('postlist'), detailPageMain);
-      });
-    } else if (kind === 'home') {
-      addStyle(WIDE_CSS); removeUnused();
-    } else {
-      whenPresent(() => document.getElementById('threadlisttableid'), () => {
-        listPageMain();
-        rearmOnReplace(() => document.getElementById('threadlisttableid'), listPageMain);
-      });
-    }
-
-    // 排查用：脚本没生效时在控制台敲 __sehuaBoot，就知道它跑没跑、当时看到的是什么
-    window.__sehuaBoot = { at: new Date().toISOString(), kind, readyState: document.readyState, version: '5.29' };
+    if (location.pathname.includes('/search.php')) searchPageMain();
+    else if (location.pathname.includes('/thread-') || location.search.includes('mod=viewthread')) detailPageMain();
+    else if (location.pathname.includes('/forum.php') && !location.search) { addStyle(WIDE_CSS); removeUnused(); }
+    else listPageMain();
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', onDomReady, { once: true });

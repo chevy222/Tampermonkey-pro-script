@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         探花
 // @namespace    http://thbt6.com/
-// @version      2.2
+// @version      2.1
 // @description  探花BT：列表页居中显示详情页预览大图 + 分辨率徽章 + 一键复制磁力 + 列表/详情页去广告
 // @author       Chevy Yang
 // @match        https://irf.522328.com/*
@@ -168,7 +168,11 @@
         `;
     }
 
+    let stylesInjected = false;
+
     function injectStyles() {
+        if (stylesInjected) return;
+        stylesInjected = true;
         const style = document.createElement('style');
         style.textContent = buildStyles();
         document.head.appendChild(style);
@@ -196,6 +200,7 @@
 
     let activeRequests = 0;
     const requestQueue = [];
+    const processedUrls = new Set();
 
     function processQueue() {
         const gmRequest = getGMRequest();
@@ -277,10 +282,11 @@
 
     // ---------------- 渲染 ----------------
 
-    function appendNotice(li, text) {
+    function appendNotice(li, text, color) {
         const span = document.createElement('span');
         span.className = CLASS.empty;
         span.textContent = text;
+        if (color) span.style.color = color;   // 默认色由 .tht-empty 的 CSS 提供
         li.appendChild(span);
     }
 
@@ -381,6 +387,9 @@
     }
 
     function addPreviewToItem(li, detailUrl) {
+        if (processedUrls.has(detailUrl)) return;
+        processedUrls.add(detailUrl);
+
         const loading = document.createElement('span');
         loading.className = CLASS.loading;
         loading.textContent = '🔄 加载中...';
@@ -405,7 +414,7 @@
             }
         }, () => {
             loading.remove();
-            appendNotice(li, '❌ 加载失败');
+            appendNotice(li, '❌ 加载失败', '#ff6b6b');
         });
     }
 
@@ -468,8 +477,6 @@
         }
 
         injectStyles();
-        // 先清一遍广告：列表等不到（空列表页 / 渲染太慢）时，旧版会连广告一起留着
-        removeAds();
 
         const startedAt = Date.now();
 
@@ -478,7 +485,7 @@
             const items = findListItems();
 
             if (items.length > 0) {
-                removeAds();   // 轮询期间可能又补进来广告位，补一刀（幂等）
+                removeAds();
                 items.forEach(({ li, href }) => addPreviewToItem(li, href));
                 return;
             }

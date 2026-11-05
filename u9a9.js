@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         U9A9
 // @namespace    https://u9a9.my/
-// @version      1.8
+// @version      1.7
 // @description  U9A9：列表页把详情页的预览图搬到列表显示（最多 5 张，横图 4:3、竖图 3:4 居中裁切），缩略图组右上角显示图片数量/剩余数量；清掉全站推广（横幅、导航推广位、假告示条、详情页侧栏与 JuicyAds）
 // @author       Chevy Yang
 // @match        https://u9a9.my/*
@@ -67,7 +67,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.8';
+  const VERSION = '1.7';
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
   if (document.documentElement.getAttribute('data-u9a9') === VERSION) return;
@@ -168,7 +168,11 @@
     }
   `;
 
+  let stylesInjected = false;
+
   function injectStyles() {
+    if (stylesInjected) return;
+    stylesInjected = true;
     document.head.insertAdjacentHTML('beforeend', `<style>${CSS}</style>`);
   }
 
@@ -461,32 +465,18 @@
     });
   }
 
-  // 等列表出现再处理：站点偶发先给一个空壳页，表格由它自己的脚本稍后才回填。
-  // 老版本 rows 为空就直接 return，之后再也不会看 —— 只能靠用户刷新给它第二次机会。
-  // 只等表格、不重发请求；最多等 10 秒（非列表页本来就没有这张表，等满即止）
-  function waitForRows(cb, tries = 40, gap = 250) {
-    const tick = n => {
-      const rows = collectRows();
-      if (rows.length) { cb(rows); return; }
-      if (n >= tries) return;
-      setTimeout(() => tick(n + 1), gap);
-    };
-    tick(0);
-  }
-
   function init() {
-    // 广告清理列表页和详情页都要走，必须放在"等表格"之前 ——
-    // 空列表页（0 条结果）等不到表格，广告也得照样清
+    // 广告清理列表页和详情页都要走，必须放在 rows 为空的提前返回之前
     removeAds();
-    if (location.pathname.startsWith('/view/')) return;
 
-    waitForRows(rows => {
-      // 列表页铺满视口，去掉 .container 固定宽度留下的左右空白（详情页保持原布局）
-      document.body.classList.add('u9-wide');
+    const rows = collectRows();
+    if (!rows.length) return;   // 详情页/其它页面：缩略图不做，广告上面已经清完
 
-      injectStyles();
-      rows.forEach(({ tr, href }) => processRow(tr, href));
-    });
+    // 列表页铺满视口，去掉 .container 固定宽度留下的左右空白（详情页保持原布局）
+    document.body.classList.add('u9-wide');
+
+    injectStyles();
+    rows.forEach(({ tr, href }) => processRow(tr, href));
   }
 
   if (document.readyState === 'loading') {

@@ -46,7 +46,7 @@ python test/server.py
 
 **色花堂**：`sehua-list`、`sehua-layout`、`sehua-detail`、`sehua-detail-preloaded`、
 `sehua-double`、`sehua-throttle`、`sehua-home`、`sehua-late-success`、`sehua-blackhole-peer`、
-`sehua-late-then-error`、`sehua-modern-url`、`sehua-search-stale`
+`sehua-late-then-error`、`sehua-modern-url`
 
 **2048**：`t2048-list`、`t2048-switch`、`t2048-read`、`t2048-late-src`、`t2048-ajax`、
 `t2048-queue-off`、`t2048-late-success`、`t2048-batch-refresh`
