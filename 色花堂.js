@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      5.27
+// @version      5.30
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（默认 4:3 横框，竖图加载完成后切 3:4 竖框，均居中裁切不拉伸；每行最多 5 张；右上角图片总数角标；宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片按队列节奏加载（默认 4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 按筛选结果自动翻页补齐（凑不满一页就往后抓原站，最多 12 页）+ 拦截原因分类重试（验证码/未登录不重试，限频按原站给的等待秒数）；右下角加载进度胶囊（翻页重算，继续补齐累加）。
 // @author       Chevy Yang
 // @match        https://iqbn.runm5.com/*
@@ -15,8 +15,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '5.27') return;
-  document.documentElement.setAttribute('data-sehua', '5.27');
+  if (document.documentElement.getAttribute('data-sehua') === '5.30') return;
+  document.documentElement.setAttribute('data-sehua', '5.30');
 
   // ============================ 可调参数 ============================
 
@@ -38,6 +38,17 @@
   // 移动版映射的请求次数上限（含首次，不是"重试几次"）与退避间隔
   const MOBILE_MAX_TRIES = 2;
   const MOBILE_RETRY_DELAY = 1500;
+
+  // 列表页每页条数：PC 一页 30 条、移动版一页 20 条（站点实测，比例 3:2）。
+  // 两边同一个 page 号不是同一批帖子，所以取图前要按行号换算页码
+  const PC_PER_PAGE = 30;
+  const MOBILE_PER_PAGE = 20;
+
+  // 盖住一页 PC 列表最多取几页移动端（换算窗口通常 2 页，再留 1 页余量）
+  const MOBILE_PAGE_SPAN_MAX = 3;
+
+  // 页尾兜底：换算没盖到的帖子，最多拿几条去详情页补图，防止算错时一页打几十个请求
+  const MAX_TAIL_FALLBACK = 12;
 
   // 详情页取图的请求次数上限（含首次）与退避间隔
   const DETAIL_MAX_TRIES = 2;
@@ -566,6 +577,15 @@
     th.appendChild(box).appendChild(em);
   }
 
+  // PC 第 N 页 = 全表第 30(N-1)+1 条起；折算到移动版是第 ⌊30(N-1)/20⌋+1 页起。
+  // 30:20 = 3:2，所以一页 PC 要 2 页移动端才盖得住（第 N 页取 1,2 / 2,3 / 4,5 / 5,6 …）
+  function mobilePageRange(pcPage) {
+    const firstRow = (pcPage - 1) * PC_PER_PAGE + 1;
+    const a = Math.floor((firstRow - 1) / MOBILE_PER_PAGE) + 1;
+    const b = Math.floor((firstRow + PC_PER_PAGE - 2) / MOBILE_PER_PAGE) + 1;
+    return { a, b };
+  }
+
   async function listPageMain() {
     const m = location.href.match(/forum-(\d+)-(\d+)\.html/), p = new URLSearchParams(location.search);
     const fid = m ? m[1] : p.get('fid');
@@ -574,22 +594,54 @@
     addStyle(THUMB_CSS + PILL_CSS + ' #threadlisttableid { table-layout: fixed !important; width: 100% !important; } #threadlisttableid th { width: 100% !important; padding-right: 12px; }');
     removeUnused();   // 顺带清掉 #autopbn 浮动翻页按钮（见函数注释）
 
-    // 移动版映射：仅被拦（null）才重试，空页不重试
-    let r = null;
-    for (let i = 0; i < MOBILE_MAX_TRIES && !r; i++) { if (i) await sleep(MOBILE_RETRY_DELAY); r = await fetchMobileThumbs(fid, m ? +m[2] : (+p.get('page') || 1)); }
-    const map = r ? r.map : {}, fallback = r ? r.fallback : [], totals = r ? (r.totals || {}) : {};
-
+    // 先把行规整好（日期搬到标题下、单列化），顺手记下本页的 tid 顺序 ——
+    // 后面要拿它判断"换算出来的几页有没有盖住整页"。
+    // normalTids 只收普通帖：置顶帖不算在两边的"每页 30 / 20 条"里，掺进来会把覆盖率算低
+    const pageTids = [], normalTids = [], threadTh = new Map();
     document.querySelectorAll('#threadlisttableid tr').forEach(tr => {
       const tbody = tr.closest('tbody[id^=normalthread_], tbody[id^=stickthread_]'), th = tr.querySelector('th');
       if (!tbody || !th) return;
       relocateDate(tr, th);
       tr.querySelectorAll('td').forEach(td => td.remove());   // 单列化：删掉作者/回复等列
       const tid = (tbody.id.match(/\d+/) || [])[0];
-      if (map[tid] && !th.querySelector('.sehua-thumb')) th.appendChild(createThumbWrap(tid, map[tid], totals[tid]));
+      if (!tid) return;
+      pageTids.push(tid);
+      threadTh.set(tid, th);
+      if (tbody.id.indexOf('stickthread_') !== 0) normalTids.push(tid);
+    });
+    if (!pageTids.length) return;
+
+    const pcPage = m ? +m[2] : (+p.get('page') || 1);
+    const map = {}, totals = {}, fallback = [], fetched = new Set();
+
+    // 取一页移动端并入总表；同一页只取一次（失败也记下，避免重试风暴）
+    const takeMobile = async mp => {
+      if (fetched.has(mp)) return null;
+      fetched.add(mp);
+      let r = null;
+      for (let i = 0; i < MOBILE_MAX_TRIES && !r; i++) { if (i) await sleep(MOBILE_RETRY_DELAY); r = await fetchMobileThumbs(fid, mp); }
+      if (!r) return null;
+      Object.assign(map, r.map);
+      Object.assign(totals, r.totals || {});
+      r.fallback.forEach(t => { if (!fallback.includes(t)) fallback.push(t); });
+      return r;
+    };
+
+    // 按 30:20 换算，一页 PC 取 2 页移动端；盖不住再顺着补 1 页（移动版实际条数有出入时）
+    const { a, b } = mobilePageRange(pcPage);
+    for (let mp = a; mp <= b; mp++) await takeMobile(mp);
+    const covered = normalTids.filter(tid => map[tid]).length;
+    if (covered < normalTids.length * 0.9 && fetched.size < MOBILE_PAGE_SPAN_MAX) await takeMobile(b + 1);
+
+    pageTids.forEach(tid => {
+      const th = threadTh.get(tid);
+      if (map[tid] && th && !th.querySelector('.sehua-thumb')) th.appendChild(createThumbWrap(tid, map[tid], totals[tid]));
     });
 
-    // 回捞：移动版有卡无图的帖子，从详情页补图（与检索页共用取图池）
-    if (fallback.length) await loadFallbackThumbs(fallback);
+    // 回捞：移动版有卡无图的帖子 + 换算没盖到的页尾，从详情页补图（与检索页共用取图池）。
+    // 后者只算普通帖、且有数量上限，避免站点结构一变就打出几十个详情请求
+    const tail = normalTids.filter(tid => !map[tid] && !fallback.includes(tid)).slice(0, MAX_TAIL_FALLBACK);
+    if (fallback.length || tail.length) await loadFallbackThumbs([...fallback, ...tail]);
   }
 
   // ============================ 详情页 ============================
