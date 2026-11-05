@@ -44,12 +44,6 @@
   const PC_PER_PAGE = 30;
   const MOBILE_PER_PAGE = 20;
 
-  // 盖住一页 PC 列表最多取几页移动端（换算窗口通常 2 页，再留 1 页余量）
-  const MOBILE_PAGE_SPAN_MAX = 3;
-
-  // 页尾兜底：换算没盖到的帖子，最多拿几条去详情页补图，防止算错时一页打几十个请求
-  const MAX_TAIL_FALLBACK = 12;
-
   // 详情页取图的请求次数上限（含首次）与退避间隔
   const DETAIL_MAX_TRIES = 2;
   const DETAIL_RETRY_DELAY = 2000;
@@ -594,10 +588,9 @@
     addStyle(THUMB_CSS + PILL_CSS + ' #threadlisttableid { table-layout: fixed !important; width: 100% !important; } #threadlisttableid th { width: 100% !important; padding-right: 12px; }');
     removeUnused();   // 顺带清掉 #autopbn 浮动翻页按钮（见函数注释）
 
-    // 先把行规整好（日期搬到标题下、单列化），顺手记下本页普通帖的 tid 顺序 ——
-    // 后面要拿它判断"换算出来的几页有没有盖住整页"。
-    // 置顶帖只做排版整理，不进取图名单：它们不占每页 30/20 条的名额（掺进去覆盖率会算低），
-    // 也不该为它们发详情页回捞 —— 版务公告本来就没图，纯属白发请求
+    // 先把行规整好（日期搬到标题下、单列化），顺手记下本页普通帖的 tid 顺序。
+    // 置顶帖只做排版整理，不进取图名单：它们不占每页 30/20 条的名额，
+    // 也不该为它们发详情页回捞 —— 版务公告本来就没图
     const pageTids = [], threadTh = new Map(), stickyTids = new Set();
     document.querySelectorAll('#threadlisttableid tr').forEach(tr => {
       const tbody = tr.closest('tbody[id^=normalthread_], tbody[id^=stickthread_]'), th = tr.querySelector('th');
@@ -629,21 +622,17 @@
       return r;
     };
 
-    // 按 30:20 换算，一页 PC 取 2 页移动端；盖不住再顺着补 1 页（移动版实际条数有出入时）
+    // 按 30:20 换算，一页 PC 取 2 页移动端（第 N 页 = 移动版 1,2 / 2,3 / 4,5 / 5,6 …）
     const { a, b } = mobilePageRange(pcPage);
     for (let mp = a; mp <= b; mp++) await takeMobile(mp);
-    const covered = pageTids.filter(tid => map[tid]).length;
-    if (covered < pageTids.length * 0.9 && fetched.size < MOBILE_PAGE_SPAN_MAX) await takeMobile(b + 1);
 
     pageTids.forEach(tid => {
       const th = threadTh.get(tid);
       if (map[tid] && th && !th.querySelector('.sehua-thumb')) th.appendChild(createThumbWrap(tid, map[tid], totals[tid]));
     });
 
-    // 回捞：移动版有卡无图的帖子 + 换算没盖到的页尾，从详情页补图（与检索页共用取图池）。
-    // 页尾这部分有数量上限，避免站点结构一变就打出几十个详情请求
-    const tail = pageTids.filter(tid => !map[tid] && !fallback.includes(tid)).slice(0, MAX_TAIL_FALLBACK);
-    if (fallback.length || tail.length) await loadFallbackThumbs([...fallback, ...tail]);
+    // 回捞：移动版有卡无图的帖子，从详情页补图（与检索页共用取图池）
+    if (fallback.length) await loadFallbackThumbs(fallback);
   }
 
   // ============================ 详情页 ============================
