@@ -290,8 +290,13 @@
     debounceTimer = setTimeout(() => processRoot(document), OBSERVE_DEBOUNCE);
   }
 
-  // 站点 AJAX 插入新帖子行时扫描新图；src 已在初始全扫时设好，不监听属性变化
-  new MutationObserver(scheduleProcess).observe(document.documentElement, { childList: true, subtree: true });
+  // 只处理站点新增的内容元素；胶囊和队列开关自身的 DOM 变化不再触发全文档补扫
+  new MutationObserver(mutations => {
+    const hasNewContent = mutations.some(m => [...m.addedNodes].some(n =>
+      n.nodeType === 1 && !n.closest('#thumb-progress, #t2048-queue-switch')
+    ));
+    if (hasNewContent) scheduleProcess();
+  }).observe(document.documentElement, { childList: true, subtree: true });
 
   // 一次性初始化：站点可能先给空壳页，导航和高级搜索面板稍后才补上，
   // 所以"挂载点还没出现"时有限次重试，而不是只在启动那一瞬间找一次。

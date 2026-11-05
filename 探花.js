@@ -168,11 +168,7 @@
         `;
     }
 
-    let stylesInjected = false;
-
     function injectStyles() {
-        if (stylesInjected) return;
-        stylesInjected = true;
         const style = document.createElement('style');
         style.textContent = buildStyles();
         document.head.appendChild(style);
@@ -200,7 +196,6 @@
 
     let activeRequests = 0;
     const requestQueue = [];
-    const processedUrls = new Set();
 
     function processQueue() {
         const gmRequest = getGMRequest();
@@ -282,11 +277,10 @@
 
     // ---------------- 渲染 ----------------
 
-    function appendNotice(li, text, color) {
+    function appendNotice(li, text) {
         const span = document.createElement('span');
         span.className = CLASS.empty;
         span.textContent = text;
-        if (color) span.style.color = color;   // 默认色由 .tht-empty 的 CSS 提供
         li.appendChild(span);
     }
 
@@ -387,9 +381,6 @@
     }
 
     function addPreviewToItem(li, detailUrl) {
-        if (processedUrls.has(detailUrl)) return;
-        processedUrls.add(detailUrl);
-
         const loading = document.createElement('span');
         loading.className = CLASS.loading;
         loading.textContent = '🔄 加载中...';
@@ -414,7 +405,7 @@
             }
         }, () => {
             loading.remove();
-            appendNotice(li, '❌ 加载失败', '#ff6b6b');
+            appendNotice(li, '❌ 加载失败');
         });
     }
 

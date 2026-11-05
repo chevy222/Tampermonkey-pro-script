@@ -78,10 +78,9 @@
 
     function overlayEsc(e) { if (e.key === 'Escape') removeOverlay(); }
 
-    function createThumbRow(imgs, tid) {
+    function createThumbRow(imgs) {
         var tr = document.createElement('tr');
         tr.className = 'thumb-row';
-        tr.setAttribute('data-tid', tid);
         var td = document.createElement('td');
         td.colSpan = 7;
         td.style.cssText = 'padding:8px 10px 10px 80px;background:#e0e8d0;border-top:1px solid #c8d0a8;';
@@ -134,7 +133,7 @@
             .then(function (html) {
                 var imgs = extractImgsFromHtml(html);
                 if (imgs.length) {
-                    var thumbRow = createThumbRow(imgs, tid);
+                    var thumbRow = createThumbRow(imgs);
                     row.parentNode.insertBefore(thumbRow, row.nextSibling);
                 }
             })
@@ -222,15 +221,17 @@
         if (hasRealChange) processList();
     });
 
-    function startObserver() {
+    function startObserver(retries) {
+        if (retries === undefined) retries = 50;
         var fid = getForumId();
         if (!fid) return;
         var tbody = document.querySelector('tbody[id^="normalthread_"], tbody[id^="stickthread_"]');
         if (tbody) {
             // 所有主题 table（置顶/推荐/普通）都在同一个 FORM 内
             observer.observe(tbody.closest('form') || document.body, { childList: true, subtree: true });
-        } else {
-            setTimeout(startObserver, 200);
+        } else if (retries > 0) {
+            // 空版块或结构变化时最多等约 10 秒，不永久轮询
+            setTimeout(function () { startObserver(retries - 1); }, 200);
         }
     }
 

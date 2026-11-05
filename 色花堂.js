@@ -697,7 +697,6 @@
     totalPages: 0,    // 原站一共多少页（从分页条最大页码推）
     readPages: 1,     // 已经读到原站第几页，刷新后从这页继续
     filling: false,
-    paused: false,
     fetched: 0,       // 本轮已经补抓了几页（只管限流保护，点「继续补齐」会清零）
     error: '',
     expired: false    // 搜索快照失效：重试没意义，只能重新搜索
@@ -748,7 +747,7 @@
     more.addEventListener('click', () => {
       // 快照失效后重试同一个 searchmd5 没用，只能拿同一个关键词重新发起一次搜索
       if (searchState.expired) { reSearchFromCurrent(); return; }
-      searchState.paused = false; searchState.error = ''; searchState.fetched = 0;
+      searchState.error = ''; searchState.fetched = 0;
       scheduleFill(); updateSearchPager();
     });
     bar.append(prev, next, more, label);
@@ -816,7 +815,6 @@
     // 补到单轮上限时 scheduleFill 已经不排定时器了，必须单独说明，
     // 否则会一直显示"正在补齐"却一个请求都不发
     else if (st.fetched >= SEARCH_FILL_MAX) tail = `本轮已补 ${SEARCH_FILL_MAX} 页，点「继续补齐」再抓`;
-    else if (st.paused) tail = '已暂停补齐';
     else tail = '5 秒后继续补齐…';   // 这个状态只是在等定时器，并没有发请求
     const totalTxt = st.totalPages ? ` / ${st.totalPages}` : '';
     label.textContent = `第 ${st.page} 页 · 本页 ${shown} / ${SEARCH_PER_PAGE} 条 · 筛选后共 ${matched} 条 · 已读原站 ${st.readPages}${totalTxt} 页 · ${tail}`;
@@ -830,7 +828,7 @@
   function scheduleFill() {
     clearTimeout(fillTimer);
     const st = searchState;
-    if (st.filling || st.paused || !st.nextUrl) return;
+    if (st.filling || !st.nextUrl) return;
     if (st.fetched >= SEARCH_FILL_MAX) return;
     if (st.items.filter(it => it.matches).length >= st.page * SEARCH_PER_PAGE) return;
     fillTimer = setTimeout(fillNextPage, SEARCH_FILL_GAP);
@@ -838,7 +836,7 @@
 
   async function fillNextPage() {
     const st = searchState;
-    if (st.filling || st.paused || !st.nextUrl) return;
+    if (st.filling || !st.nextUrl) return;
     st.filling = true;
     updateSearchPager();
     let r;
@@ -888,10 +886,12 @@
     await Promise.all(Array.from({ length: MAX_CONCURRENT }, async () => {
       while (i < tasks.length) {
         const task = tasks[i++];
+        if (!task.target.isConnected || task.target.style.display === 'none') continue;
         const tip = task.target.appendChild(Object.assign(document.createElement('div'), { className: 'sehua-loading', textContent: '加载中...' }));
         try {
           const urls = await fetchDetailImages(task.tid);
-          if (urls === null) continue;                  // 被拦：不标记，下次刷新再试
+          // 翻页/过滤后，旧页仍在飞的请求不得再注入或计入新页；仍可见的条目照常复用结果
+          if (!task.target.isConnected || task.target.style.display === 'none' || urls === null) continue;
           task.target.dataset.sehuaChecked = '1';
           if (urls.length && !task.target.querySelector('.sehua-thumb')) {
             task.target.appendChild(createThumbWrap(task.tid, urls));
@@ -937,7 +937,7 @@
     searchPager = null;
     // URL 带 page 就说明上次读到这儿了，从这页接着读；fetched 单独归零，只用于限流保护
     const urlPage = Math.max(1, +(new URLSearchParams(location.search).get('page') || 1));
-    Object.assign(searchState, { items: [], page: 1, totalPages: 0, readPages: urlPage, filling: false, paused: false, fetched: 0, error: '' });
+    Object.assign(searchState, { items: [], page: 1, totalPages: 0, readPages: urlPage, filling: false, fetched: 0, error: '' });
     collectSearchItems();
     searchState.nextUrl = searchNextUrl(document);
     searchState.totalPages = searchTotalPages(document);

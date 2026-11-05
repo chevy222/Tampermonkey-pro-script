@@ -310,6 +310,22 @@ window.runTest = async (name) => {
         ok('切换后状态更新', !!saved2 && saved2['求片问答悬赏区'] === false);
       }
     },
+    'sehua-search-stale': {
+      src: SRC_SEHUA, wait: 100, clear: true,
+      preset: () => localStorage.setItem('sehuaFilterState', JSON.stringify({ '求片问答悬赏区': false })),
+      gm: [{ re: /mod=viewthread&tid=(\d+)/, html: DETAIL_HTML, delay: 400 }],
+      assert: async ({ ok, d, calls, sleep }) => {
+        ok('过滤前两个可见帖子都开始取图', calls.length === 2 && calls.some(u => /tid=201/.test(u)) && calls.some(u => /tid=202/.test(u)));
+        const cb201 = [...d.querySelectorAll('.sehua-forum-switch input')].find(i => i.dataset.forum === '求片问答悬赏区');
+        cb201.checked = true;
+        cb201.dispatchEvent(new Event('change', { bubbles: true }));
+        await sleep(1200);
+        ok('请求途中隐藏的条目被过滤', d.getElementById('thread201').style.display === 'none');
+        ok('旧请求迟到后不注入隐藏条目', !d.getElementById('thread201').querySelector('.sehua-thumb') && !d.getElementById('thread201').dataset.sehuaChecked);
+        ok('仍然可见的条目正常复用迟到结果', d.getElementById('thread202').querySelectorAll('.sehua-thumb img').length === 2);
+        ok('可见条目没有重复请求', calls.length === 2);
+      }
+    },
     'sehua-filter': {
       src: SRC_SEHUA, wait: 2500,
       gm: [
@@ -580,7 +596,7 @@ window.runTest = async (name) => {
     't2048-read': {
       src: SRC_T2048, wait: 3000, pillId: 'thumb-progress', watchPill: true, observerTest: true,
       assert: async ({ ok, d, pillLog, sleep }) => {
-        // 先等胶囊淡出节点移除（它自身也是 DOM 变动，会连带触发一次 sweep），避开时序撞车
+        // 先等胶囊淡出节点移除，避开后续断言的时序撞车
         await sleep(1600);
         const imgs = d.querySelectorAll('#postlist img');
         const placeholders = [...imgs].slice(0, 5);
@@ -632,16 +648,17 @@ window.runTest = async (name) => {
   if (sc.gm) {
     window.GM_xmlhttpRequest = o => {
       calls.push(o.url);
-      let text = null;
+      let text = null, delay = 0;
       for (const h of sc.gm) {
         const m = o.url.match(h.re);
         if (m) {
           if (h.hang) return;   // 永不回调：模拟 TM 请求"连接后挂起"（onTimeout 失效）
           text = (typeof h.html === 'function' ? h.html(m) : h.html);
+          delay = h.delay || 0;
           break;
         }
       }
-      setTimeout(() => { if (text === null) o.onerror(); else o.onload({ responseText: text }); }, 0);
+      setTimeout(() => { if (text === null) o.onerror(); else o.onload({ responseText: text }); }, delay);
     };
   }
   let srcLog = [];

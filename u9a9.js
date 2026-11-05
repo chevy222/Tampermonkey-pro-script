@@ -168,11 +168,7 @@
     }
   `;
 
-  let stylesInjected = false;
-
   function injectStyles() {
-    if (stylesInjected) return;
-    stylesInjected = true;
     document.head.insertAdjacentHTML('beforeend', `<style>${CSS}</style>`);
   }
 
@@ -482,6 +478,7 @@
     // 广告清理列表页和详情页都要走，必须放在"等表格"之前 ——
     // 空列表页（0 条结果）等不到表格，广告也得照样清
     removeAds();
+    if (location.pathname.startsWith('/view/')) return;
 
     waitForRows(rows => {
       // 列表页铺满视口，去掉 .container 固定宽度留下的左右空白（详情页保持原布局）
