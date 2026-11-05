@@ -21,7 +21,8 @@ python test/server.py
 | `/thread-101-1-1.html` | 色花堂详情页（占位图） |
 | `/thread-102-1-1.html` | 色花堂详情页（站点已直出真址） |
 | `/thread-104-1-1.html` | 色花堂详情页（1 快 + 1 张 11.2 秒慢图） |
-| `/thread-106-1-1.html` | 色花堂详情页（1 张 11.2 秒慢图 + 1 张永不回调的黑洞图） || `/thread.php?fid=15&search=img&page=1` | 2048 列表页 |
+| `/thread-106-1-1.html` | 色花堂详情页（1 张 11.2 秒慢图 + 1 张永不回调的黑洞图） |
+| `/thread.php?fid=15&search=img&page=1` | 2048 列表页 |
 | `/read.php?tid=1` | 2048 详情页（占位图） |
 | `/read-slow.php` | 2048 详情页（1 快 + 1 张 11.2 秒慢图） |
 | `/read-slow2.php` | 2048 详情页（1 快 + 1 张 13.2 秒慢图） |
@@ -46,7 +47,9 @@ python test/server.py
 
 **色花堂**：`sehua-list`、`sehua-layout`、`sehua-detail`、`sehua-detail-preloaded`、
 `sehua-double`、`sehua-throttle`、`sehua-home`、`sehua-late-success`、`sehua-blackhole-peer`、
-`sehua-late-then-error`、`sehua-modern-url`
+`sehua-late-then-error`、`sehua-modern-url`、`sehua-busy`、`sehua-cooldown`、`sehua-crossclear`、
+`sehua-date`、`sehua-empty`、`sehua-filter`、`sehua-hang`、`sehua-mobile-detail`、`sehua-no-nav`、
+`sehua-port`、`sehua-progress`、`sehua-queue-off`、`sehua-queue-switch`、`sehua-safeid`、`sehua-search`
 
 **2048**：`t2048-list`、`t2048-switch`、`t2048-read`、`t2048-late-src`、`t2048-ajax`、
 `t2048-queue-off`、`t2048-late-success`、`t2048-batch-refresh`
