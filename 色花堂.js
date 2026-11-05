@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      5.30
+// @version      5.31
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（默认 4:3 横框，竖图加载完成后切 3:4 竖框，均居中裁切不拉伸；每行最多 5 张；右上角图片总数角标；宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片按队列节奏加载（默认 4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 按筛选结果自动翻页补齐（凑不满一页就往后抓原站，最多 12 页）+ 拦截原因分类重试（验证码/未登录不重试，限频按原站给的等待秒数）；右下角加载进度胶囊（翻页重算，继续补齐累加）。
 // @author       Chevy Yang
 // @match        https://iqbn.runm5.com/*
@@ -15,8 +15,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '5.30') return;
-  document.documentElement.setAttribute('data-sehua', '5.30');
+  if (document.documentElement.getAttribute('data-sehua') === '5.31') return;
+  document.documentElement.setAttribute('data-sehua', '5.31');
 
   // ============================ 可调参数 ============================
 
@@ -594,10 +594,11 @@
     addStyle(THUMB_CSS + PILL_CSS + ' #threadlisttableid { table-layout: fixed !important; width: 100% !important; } #threadlisttableid th { width: 100% !important; padding-right: 12px; }');
     removeUnused();   // 顺带清掉 #autopbn 浮动翻页按钮（见函数注释）
 
-    // 先把行规整好（日期搬到标题下、单列化），顺手记下本页的 tid 顺序 ——
+    // 先把行规整好（日期搬到标题下、单列化），顺手记下本页普通帖的 tid 顺序 ——
     // 后面要拿它判断"换算出来的几页有没有盖住整页"。
-    // normalTids 只收普通帖：置顶帖不算在两边的"每页 30 / 20 条"里，掺进来会把覆盖率算低
-    const pageTids = [], normalTids = [], threadTh = new Map();
+    // 置顶帖只做排版整理，不进取图名单：它们不占每页 30/20 条的名额（掺进去覆盖率会算低），
+    // 也不该为它们发详情页回捞 —— 版务公告本来就没图，纯属白发请求
+    const pageTids = [], threadTh = new Map(), stickyTids = new Set();
     document.querySelectorAll('#threadlisttableid tr').forEach(tr => {
       const tbody = tr.closest('tbody[id^=normalthread_], tbody[id^=stickthread_]'), th = tr.querySelector('th');
       if (!tbody || !th) return;
@@ -605,9 +606,9 @@
       tr.querySelectorAll('td').forEach(td => td.remove());   // 单列化：删掉作者/回复等列
       const tid = (tbody.id.match(/\d+/) || [])[0];
       if (!tid) return;
+      if (tbody.id.indexOf('stickthread_') === 0) { stickyTids.add(tid); return; }   // 置顶不取图
       pageTids.push(tid);
       threadTh.set(tid, th);
-      if (tbody.id.indexOf('stickthread_') !== 0) normalTids.push(tid);
     });
     if (!pageTids.length) return;
 
@@ -623,15 +624,16 @@
       if (!r) return null;
       Object.assign(map, r.map);
       Object.assign(totals, r.totals || {});
-      r.fallback.forEach(t => { if (!fallback.includes(t)) fallback.push(t); });
+      // 移动版里的置顶卡也不回捞
+      r.fallback.forEach(t => { if (!stickyTids.has(t) && !fallback.includes(t)) fallback.push(t); });
       return r;
     };
 
     // 按 30:20 换算，一页 PC 取 2 页移动端；盖不住再顺着补 1 页（移动版实际条数有出入时）
     const { a, b } = mobilePageRange(pcPage);
     for (let mp = a; mp <= b; mp++) await takeMobile(mp);
-    const covered = normalTids.filter(tid => map[tid]).length;
-    if (covered < normalTids.length * 0.9 && fetched.size < MOBILE_PAGE_SPAN_MAX) await takeMobile(b + 1);
+    const covered = pageTids.filter(tid => map[tid]).length;
+    if (covered < pageTids.length * 0.9 && fetched.size < MOBILE_PAGE_SPAN_MAX) await takeMobile(b + 1);
 
     pageTids.forEach(tid => {
       const th = threadTh.get(tid);
@@ -639,8 +641,8 @@
     });
 
     // 回捞：移动版有卡无图的帖子 + 换算没盖到的页尾，从详情页补图（与检索页共用取图池）。
-    // 后者只算普通帖、且有数量上限，避免站点结构一变就打出几十个详情请求
-    const tail = normalTids.filter(tid => !map[tid] && !fallback.includes(tid)).slice(0, MAX_TAIL_FALLBACK);
+    // 页尾这部分有数量上限，避免站点结构一变就打出几十个详情请求
+    const tail = pageTids.filter(tid => !map[tid] && !fallback.includes(tid)).slice(0, MAX_TAIL_FALLBACK);
     if (fallback.length || tail.length) await loadFallbackThumbs([...fallback, ...tail]);
   }
 
