@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         色花堂
 // @namespace    http://98tang.com/
-// @version      5.32
+// @version      5.33
 // @description  色花堂：去广告；PC 列表页注入移动版缩略图（默认 4:3 横框，竖图加载完成后切 3:4 竖框，均居中裁切不拉伸；每行最多 5 张；右上角图片总数角标；宽屏单列，日期搬到标题下；移动版无图的帖子从详情页补图）；图片按队列节奏加载（默认 4 张/秒、在途≤6、首屏突发 6），"新帖瀑布流"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；详情页宽屏、正文图去懒加载；检索页宽屏单列 + 栏目过滤 + 按筛选结果自动翻页补齐（凑不满一页就往后抓原站，最多 12 页）+ 拦截原因分类重试（验证码/未登录不重试，限频按原站给的等待秒数）；右下角加载进度胶囊（翻页重算，继续补齐累加）。
 // @author       Chevy Yang
 // @match        https://iqbn.runm5.com/*
@@ -15,8 +15,8 @@
   // ============================ 哨兵 ============================
 
   // 防双注入：同版本已占位则退出；旧版本占位（值不同）不退出，改写哨兵接管
-  if (document.documentElement.getAttribute('data-sehua') === '5.32') return;
-  document.documentElement.setAttribute('data-sehua', '5.32');
+  if (document.documentElement.getAttribute('data-sehua') === '5.33') return;
+  document.documentElement.setAttribute('data-sehua', '5.33');
 
   // ============================ 可调参数 ============================
 
@@ -194,9 +194,11 @@
     return { retry: false, msg: '搜索结果页没有结果条目' };
   }
 
-  // 下一页地址：只认原站自己的 nxt 链接，别自己拼参数（searchid / searchmd5 会变）
+  // 下一页地址：只认原站自己的 nxt 链接，别自己拼参数（searchid / searchmd5 会变）。
+  // 有的模板（导读页）不给 class，退化成按文案找「下一页」
   const searchNextUrl = doc => {
-    const a = doc.querySelector('.pg a.nxt, .pages a.next, a.nxt');
+    let a = doc.querySelector('.pg a.nxt, .pages a.next, a.nxt');
+    if (!a) a = [...doc.querySelectorAll('.pg a, .pages a, a')].find(x => (x.textContent || '').trim() === '下一页');
     if (!a) return null;
     try { return new URL(a.getAttribute('href'), location.href).href; } catch (e) { return null; }
   };
@@ -655,6 +657,156 @@
     });
   }
 
+  // ==================== 列表类页面（检索 / 导读）共用层 ====================
+  // 两边的流程是同一套：收条目 → 按栏目过滤 → 自己分页 → 不够就往后抓 → 逐帖补缩略图。
+  // 跟站点结构绑定的只有"怎么找条目、抓到的新页往哪塞"，那部分留在各自的适配函数里。
+  //
+  // 状态形状：
+  // { items:[{ el, tid, forum, target, extra?, matches }], page, perPage, nextUrl, totalPages,
+  //   readPages, filling, paused, fetched, error, expired, timer }
+  // el=整行（显隐用）、target=缩略图容器、extra=要跟着显示/隐藏的附加行（导读页的缩略图行）
+
+  // 分页条：三个按钮 + 一行状态（两边同一套外观和行为）
+  function makePagerBar(onPrev, onNext, onMore) {
+    const bar = Object.assign(document.createElement('div'), { className: 'sehua-pager' });
+    const prev = Object.assign(document.createElement('button'), { type: 'button', textContent: '上一页' });
+    const next = Object.assign(document.createElement('button'), { type: 'button', textContent: '下一页' });
+    const more = Object.assign(document.createElement('button'), { type: 'button', textContent: '继续补齐' });
+    const label = Object.assign(document.createElement('span'), { className: 'sehua-pager-state' });
+    prev.addEventListener('click', onPrev);
+    next.addEventListener('click', onNext);
+    more.addEventListener('click', onMore);
+    bar.append(prev, next, more, label);
+    return { bar, prev, next, more, label };
+  }
+
+  // 当前页该显示哪一段
+  function pagerView(st) {
+    const matched = st.items.filter(it => it.matches);
+    const start = (st.page - 1) * st.perPage;
+    return {
+      matched, start,
+      shown: Math.max(0, Math.min(st.perPage, matched.length - start)),
+      full: matched.length >= st.page * st.perPage
+    };
+  }
+
+  function paintPager(st, ui) {
+    if (!ui) return;
+    const v = pagerView(st);
+    ui.prev.disabled = st.page <= 1 || st.filling;
+    // 下一页必须有东西才让点：matched 要超过当前页末尾，否则翻过去是空白页
+    ui.next.disabled = st.filling || v.matched.length <= st.page * st.perPage;
+    // 只有正在请求时才禁用：nextUrl 一被清空就锁死的话，用户连重试都点不到
+    ui.more.disabled = st.filling;
+    ui.more.textContent = st.expired ? '重新搜索' : '继续补齐';
+    let tail;
+    if (st.filling) tail = '正在读取原站下一页…';
+    else if (st.expired) tail = st.error + '，点「重新搜索」用同一个关键词从头再搜';
+    else if (st.error) tail = st.error + (st.nextUrl ? '（点「继续补齐」重试）' : '');
+    else if (!st.nextUrl) tail = '已到底';
+    else if (v.full) tail = '本页已满';
+    // 补到单轮上限时定时器已经不排了，必须单独说明，否则一直显示"正在补齐"却没请求
+    else if (st.fetched >= SEARCH_FILL_MAX) tail = `本轮已补 ${SEARCH_FILL_MAX} 页，点「继续补齐」再抓`;
+    else if (st.paused) tail = '已暂停补齐';
+    else tail = '5 秒后继续补齐…';
+    const totalTxt = st.totalPages ? ` / ${st.totalPages}` : '';
+    ui.label.textContent = `第 ${st.page} 页 · 本页 ${v.shown} / ${st.perPage} 条 · 筛选后共 ${v.matched.length} 条 · 已读原站 ${st.readPages}${totalTxt} 页 · ${tail}`;
+    ui.label.title = '「筛选后共」= 已经抓下来的全部原始结果里，没被栏目过滤掉的总条数。'
+      + '「已读原站」= 为了凑够这一页，一共往后翻了多少个原站页面（斜杠后面是原站总页数）。';
+  }
+
+  // 按过滤开关切页：只显示"命中条目里的第 page 页那一段"
+  function applyListFilter(st, ui) {
+    const hidden = {};
+    document.querySelectorAll('.sehua-forum-switch input:checked').forEach(cb => hidden[cb.dataset.forum] = 1);
+    const matched = [];
+    st.items.forEach(it => { it.matches = !hidden[it.forum]; if (it.matches) matched.push(it); });
+    const start = (st.page - 1) * st.perPage;
+    const on = new Set(matched.slice(start, start + st.perPage));
+    st.items.forEach(it => {
+      const show = on.has(it);
+      it.el.style.display = show ? '' : 'none';
+      // 导读页的缩略图行：没图就整行收起，别留一条空白
+      if (it.extra) it.extra.style.display = (show && it.target.querySelector('.sehua-thumb')) ? '' : 'none';
+    });
+    paintPager(st, ui);
+  }
+
+  // 逐帖取详情图注入 item.target；只处理当前显示、还没取过的条目
+  let loadingThumbs = false, pendingReload = false, thumbsState = null;
+
+  async function loadListThumbs(st) {
+    thumbsState = st;
+    if (loadingThumbs) { pendingReload = true; return; }
+    loadingThumbs = true;
+    try {
+      const tasks = st.items
+        .filter(it => it.target && it.el.style.display !== 'none' && !it.target.querySelector('.sehua-thumb') && !it.target.dataset.sehuaChecked)
+        .map(it => ({ tid: it.tid, target: it.target }))
+        .filter(t => t.tid);
+      await runThumbPool(tasks);
+      // 有的帖子本来就没图：把它的附加行收起来
+      st.items.forEach(it => {
+        if (it.extra) it.extra.style.display = (it.el.style.display !== 'none' && it.target.querySelector('.sehua-thumb')) ? '' : 'none';
+      });
+    } finally {
+      loadingThumbs = false;
+      if (pendingReload) { pendingReload = false; loadListThumbs(thumbsState); }
+    }
+  }
+
+  // 补齐：抓下一页 → 追加 → 重新过滤 → 继续排定时器
+  function scheduleListFill(st, ui, opts) {
+    clearTimeout(st.timer);
+    if (st.filling || st.paused || !st.nextUrl) return;
+    if (st.fetched >= SEARCH_FILL_MAX) return;
+    if (st.items.filter(it => it.matches).length >= st.page * st.perPage) return;
+    st.timer = setTimeout(() => fillListStep(st, ui, opts), SEARCH_FILL_GAP);
+  }
+
+  async function fillListStep(st, ui, opts) {
+    if (st.filling || st.paused || !st.nextUrl) return;
+    st.filling = true;
+    paintPager(st, ui);
+    let r;
+    try { r = await opts.fetchPage(st.nextUrl); }
+    catch (e) { r = { ok: false, retry: true, msg: '抓取下一页失败：' + ((e && e.message) || e) }; }
+    finally { st.filling = false; }
+    if (!r.ok) {
+      st.error = r.msg || '抓取下一页失败';
+      if (r.expired) st.expired = true;
+      if (!r.retry) st.nextUrl = null;   // 验证码/未登录这类不可重试，别再自动试
+      paintPager(st, ui);
+      return;
+    }
+    opts.append(r);
+    st.nextUrl = r.next;
+    st.fetched += 1;
+    st.readPages += 1;
+    st.error = '';
+    applyListFilter(st, ui);
+    loadListThumbs(st);
+    if (opts.afterFill) opts.afterFill();   // 把"读到第几页"写进 URL
+    scheduleListFill(st, ui, opts);
+  }
+
+  // 过滤开关的公共零件（检索页插进 .sttl，导读页插进自建工具条）
+  function createForumSwitchWrap() {
+    const wrap = Object.assign(document.createElement('div'), { className: 'sehua-forum-switch', style: 'display:flex;gap:12px;align-items:center;font-size:12px;flex-wrap:wrap;' });
+    let saved = {}; try { saved = JSON.parse(localStorage.getItem(FILTER_KEY) || '{}'); } catch (e) {}
+    BLOCK_FORUMS.forEach(name => {
+      wrap.insertAdjacentHTML('beforeend', `<label style="display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none;"><input type="checkbox" data-forum="${name}"${(saved[name] ?? true) ? ' checked' : ''}><span>隐藏${name}</span></label>`);
+    });
+    return wrap;
+  }
+
+  function saveForumSwitchState() {
+    const st = {};
+    document.querySelectorAll('.sehua-forum-switch input').forEach(c => st[c.dataset.forum] = c.checked);
+    try { localStorage.setItem(FILTER_KEY, JSON.stringify(st)); } catch (e) {}
+  }
+
   // ============================ 检索页 ============================
 
   // 栏目过滤开关：勾选的栏目隐藏对应结果，状态记在本地
@@ -662,11 +814,7 @@
     const sttl = document.querySelector('.sttl.mbn');
     if (!sttl) return null;
     sttl.style.cssText = 'display:flex; align-items:center; flex-wrap:wrap; gap:8px;';
-    const wrap = Object.assign(document.createElement('div'), { className: 'sehua-forum-switch', style: 'display:flex; gap:12px; align-items:center; font-size:12px;' });
-    let saved = {}; try { saved = JSON.parse(localStorage.getItem(FILTER_KEY) || '{}'); } catch (e) {}
-    BLOCK_FORUMS.forEach(name => {
-      wrap.insertAdjacentHTML('beforeend', `<label style="display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none;"><input type="checkbox" data-forum="${name}"${(saved[name] ?? true) ? ' checked' : ''}><span>隐藏${name}</span></label>`);
-    });
+    const wrap = createForumSwitchWrap();
     sttl.appendChild(wrap);
     return wrap;
   }
@@ -675,8 +823,9 @@
   // 原站一页固定 30 条，过滤掉隐藏栏目后常只剩几条，所以不跟着原站翻页，
   // 而是自己维护页码，不够就往后抓页补满
   const searchState = {
-    items: [],        // [{ el, forum, matches }]
+    items: [],        // [{ el, tid, target, forum, matches }]
     page: 1,          // 脚本自己的页码（筛选结果分页），和原站页码无关
+    perPage: SEARCH_PER_PAGE,
     nextUrl: null,
     totalPages: 0,    // 原站一共多少页（从分页条最大页码推）
     readPages: 1,     // 已经读到原站第几页，刷新后从这页继续
@@ -684,7 +833,8 @@
     paused: false,
     fetched: 0,       // 本轮已经补抓了几页（只管限流保护，点「继续补齐」会清零）
     error: '',
-    expired: false    // 搜索快照失效：重试没意义，只能重新搜索
+    expired: false,   // 搜索快照失效：重试没意义，只能重新搜索
+    timer: null
   };
 
   // 把 DOM 里所有结果条目收进 items（已在 items 里的跳过）
@@ -693,7 +843,13 @@
     document.querySelectorAll('#threadlist li.pbw').forEach(li => {
       if (seen.has(li)) return;
       const fl = li.querySelector('a[href*=forum-]');
-      searchState.items.push({ el: li, forum: fl ? fl.textContent.trim() : '', matches: true });
+      searchState.items.push({
+        el: li,
+        tid: (li.id.match(/\d+/) || [])[0],
+        target: li,
+        forum: fl ? fl.textContent.trim() : '',
+        matches: true
+      });
     });
   }
 
@@ -715,35 +871,29 @@
     return added;
   }
 
-  let searchPager = null;
+  let searchUi = null;
 
   // 原站分页条隐藏（内容已跨页合并），换成脚本自己的分页条
   function mountSearchPager() {
-    searchPager = document.querySelector('.sehua-pager');
-    if (searchPager) return;
-    const bar = document.createElement('div');
-    bar.className = 'sehua-pager';
-    const prev = Object.assign(document.createElement('button'), { type: 'button', textContent: '上一页' });
-    const next = Object.assign(document.createElement('button'), { type: 'button', textContent: '下一页' });
-    const more = Object.assign(document.createElement('button'), { type: 'button', textContent: '继续补齐' });
-    const label = Object.assign(document.createElement('span'), { className: 'sehua-pager-state' });
-    prev.addEventListener('click', () => gotoSearchPage(-1));
-    next.addEventListener('click', () => gotoSearchPage(1));
-    more.addEventListener('click', () => {
-      // 快照失效后重试同一个 searchmd5 没用，只能拿同一个关键词重新发起一次搜索
-      if (searchState.expired) { reSearchFromCurrent(); return; }
-      searchState.paused = false; searchState.error = ''; searchState.fetched = 0;
-      scheduleFill(); updateSearchPager();
-    });
-    bar.append(prev, next, more, label);
+    if (searchUi) return;
+    const ui = makePagerBar(
+      () => gotoSearchPage(-1),
+      () => gotoSearchPage(1),
+      () => {
+        // 快照失效后重试同一个 searchmd5 没用，只能拿同一个关键词重新发起一次搜索
+        if (searchState.expired) { reSearchFromCurrent(); return; }
+        searchState.paused = false; searchState.error = ''; searchState.fetched = 0;
+        scheduleFill();
+      }
+    );
     const pg = document.querySelector('.pg');
-    if (pg) { pg.style.display = 'none'; pg.insertAdjacentElement('beforebegin', bar); }
+    if (pg) { pg.style.display = 'none'; pg.insertAdjacentElement('beforebegin', ui.bar); }
     else {
       const list = document.getElementById('threadlist');
       if (!list) return;
-      list.insertAdjacentElement('afterend', bar);
+      list.insertAdjacentElement('afterend', ui.bar);
     }
-    searchPager = bar;
+    searchUi = ui;
   }
 
   // 用当前关键词重新发起搜索（会拿到新的 searchid/searchmd5）。
@@ -775,96 +925,18 @@
     scheduleFill();
   }
 
-  function updateSearchPager() {
-    if (!searchPager) return;
-    const st = searchState;
-    const matched = st.items.filter(it => it.matches).length;
-    const start = (st.page - 1) * SEARCH_PER_PAGE;
-    const full = matched >= st.page * SEARCH_PER_PAGE;
-    const [prev, next, more] = searchPager.querySelectorAll('button');
-    const label = searchPager.querySelector('.sehua-pager-state');
-    prev.disabled = st.page <= 1 || st.filling;
-    // 下一页必须有东西才让点：matched 要超过当前页末尾。
-    // 原来只判 full（当前页满没满），matched 恰好 = page×30 时仍可点，翻过去是空白页
-    next.disabled = st.filling || matched <= st.page * SEARCH_PER_PAGE;
-    // 只有正在请求时才禁用：之前 nextUrl 一被清空按钮就永久锁死，用户连重试都点不到
-    more.disabled = st.filling;
-    more.textContent = st.expired ? '重新搜索' : '继续补齐';
-    const shown = Math.max(0, Math.min(SEARCH_PER_PAGE, matched - start));
-    let tail;
-    if (st.filling) tail = '正在读取原站下一页…';
-    else if (st.expired) tail = st.error + '，点「重新搜索」用同一个关键词从头再搜';
-    else if (st.error) tail = st.error + (st.nextUrl ? '（点「继续补齐」重试）' : '');
-    else if (!st.nextUrl) tail = '已到底';
-    else if (full) tail = '本页已满';
-    // 补到单轮上限时 scheduleFill 已经不排定时器了，必须单独说明，
-    // 否则会一直显示"正在补齐"却一个请求都不发
-    else if (st.fetched >= SEARCH_FILL_MAX) tail = `本轮已补 ${SEARCH_FILL_MAX} 页，点「继续补齐」再抓`;
-    else if (st.paused) tail = '已暂停补齐';
-    else tail = '5 秒后继续补齐…';   // 这个状态只是在等定时器，并没有发请求
-    const totalTxt = st.totalPages ? ` / ${st.totalPages}` : '';
-    label.textContent = `第 ${st.page} 页 · 本页 ${shown} / ${SEARCH_PER_PAGE} 条 · 筛选后共 ${matched} 条 · 已读原站 ${st.readPages}${totalTxt} 页 · ${tail}`;
-    // 「筛选后共」容易被读成"本次搜索命中"，这里补个悬浮说明
-    label.title = '「筛选后共」= 已经抓下来的全部原始结果里，没被栏目过滤掉的总条数。'
-      + '「已读原站」= 为了凑够这一页，一共往后翻了多少个原站页面（斜杠后面是原站总页数）。';
-  }
+  // 检索页在这套共用层上只是薄薄一层适配：状态 + 三件站点相关的事（抓页、追加、记 URL）
+  const searchOpts = {
+    fetchPage: fetchSearchPage,
+    append: r => appendSearchItems(r.items),
+    afterFill: () => syncUrlPage()   // 把"读到第几页"写进 URL，刷新后从这页接着读
+  };
 
-  let fillTimer = null;
-
-  function scheduleFill() {
-    clearTimeout(fillTimer);
-    const st = searchState;
-    if (st.filling || st.paused || !st.nextUrl) return;
-    if (st.fetched >= SEARCH_FILL_MAX) return;
-    if (st.items.filter(it => it.matches).length >= st.page * SEARCH_PER_PAGE) return;
-    fillTimer = setTimeout(fillNextPage, SEARCH_FILL_GAP);
-  }
-
-  async function fillNextPage() {
-    const st = searchState;
-    if (st.filling || st.paused || !st.nextUrl) return;
-    st.filling = true;
-    updateSearchPager();
-    let r;
-    try {
-      r = await fetchSearchPage(st.nextUrl);
-    } catch (e) {
-      // 请求本身抛错也要把 filling 放开，否则补齐功能会永久卡在"正在读取"
-      r = { ok: false, retry: true, msg: '抓取下一页失败：' + ((e && e.message) || e) };
-    } finally {
-      st.filling = false;
-    }
-    if (!r.ok) {
-      st.error = r.msg || '抓取下一页失败';
-      if (r.expired) st.expired = true;
-      if (!r.retry) st.nextUrl = null;   // 验证码/未登录这类不可重试，别再自动试
-      updateSearchPager();
-      return;
-    }
-    appendSearchItems(r.items);
-    st.nextUrl = r.next;
-    st.fetched += 1;
-    st.readPages += 1;
-    st.error = '';
-    applyFilter();
-    loadDetailThumbs();
-    syncUrlPage();   // 把"读到第几页"写进 URL，刷新后从这页接着读
-    scheduleFill();
-  }
-
-  function applyFilter() {
-    const hidden = {};
-    document.querySelectorAll('.sehua-forum-switch input:checked').forEach(cb => hidden[cb.dataset.forum] = 1);
-    const matched = [];
-    searchState.items.forEach(it => {
-      it.matches = !hidden[it.forum];
-      if (it.matches) matched.push(it);
-    });
-    const start = (searchState.page - 1) * SEARCH_PER_PAGE;
-    searchState.items.forEach(it => { it.el.style.display = 'none'; });
-    matched.slice(start, start + SEARCH_PER_PAGE).forEach(it => { it.el.style.display = ''; });
-    updateSearchPager();
-  }
+  const updateSearchPager = () => paintPager(searchState, searchUi);
+  const applyFilter = () => applyListFilter(searchState, searchUi);
+  const scheduleFill = () => scheduleListFill(searchState, searchUi, searchOpts);
+  const fillNextPage = () => fillListStep(searchState, searchUi, searchOpts);
+  const loadDetailThumbs = () => loadListThumbs(searchState);
 
   // 取图池核心：并发逐帖取详情图，注入 target 并计入胶囊
   async function runThumbPool(tasks) {
@@ -885,24 +957,6 @@
     }));
   }
 
-  let loadingThumbs = false, pendingReload = false;
-
-  // 检索页：只对可见（未被过滤）的结果取详情图；运行中再触发会补跑一轮
-  async function loadDetailThumbs() {
-    if (loadingThumbs) { pendingReload = true; return; }
-    loadingThumbs = true;
-    try {
-      const tasks = [...document.querySelectorAll('#threadlist li.pbw')]
-        .filter(li => li.style.display !== 'none' && !li.querySelector('.sehua-thumb') && !li.dataset.sehuaChecked)
-        .map(li => ({ tid: (li.id.match(/\d+/) || [])[0], target: li }))
-        .filter(t => t.tid);
-      await runThumbPool(tasks);
-    } finally {
-      loadingThumbs = false;
-      if (pendingReload) { pendingReload = false; loadDetailThumbs(); }
-    }
-  }
-
   // 列表页回捞：移动版映射里没给出图的帖子，从详情页补图
   async function loadFallbackThumbs(tids) {
     const tasks = [...document.querySelectorAll('#threadlisttableid tbody[id^=normalthread_], #threadlisttableid tbody[id^=stickthread_]')]
@@ -918,10 +972,10 @@
 
     // 拦截重试换过 DOM 后会再进来一次：旧开关、旧分页条、旧状态都要重置
     document.querySelectorAll('.sehua-forum-switch, .sehua-pager').forEach(el => el.remove());
-    searchPager = null;
+    searchUi = null;
     // URL 带 page 就说明上次读到这儿了，从这页接着读；fetched 单独归零，只用于限流保护
     const urlPage = Math.max(1, +(new URLSearchParams(location.search).get('page') || 1));
-    Object.assign(searchState, { items: [], page: 1, totalPages: 0, readPages: urlPage, filling: false, paused: false, fetched: 0, error: '' });
+    Object.assign(searchState, { items: [], page: 1, perPage: SEARCH_PER_PAGE, totalPages: 0, readPages: urlPage, filling: false, paused: false, fetched: 0, error: '', timer: null });
     collectSearchItems();
     searchState.nextUrl = searchNextUrl(document);
     searchState.totalPages = searchTotalPages(document);
@@ -932,8 +986,7 @@
     if (bar) bar.querySelectorAll('input').forEach(cb => cb.addEventListener('change', () => {
       searchState.page = 1;   // 换过滤条件回到第一页
       applyFilter();
-      const st = {}; document.querySelectorAll('.sehua-forum-switch input').forEach(c => st[c.dataset.forum] = c.checked);
-      try { localStorage.setItem(FILTER_KEY, JSON.stringify(st)); } catch (e) {}
+      saveForumSwitchState();
       loadDetailThumbs();
       scheduleFill();
     }));
@@ -941,6 +994,174 @@
     applyFilter();
     scheduleFill();
     await loadDetailThumbs();
+  }
+
+  // ============================ 导读页 ============================
+  // forum.php?mod=guide：一行一帖躺在表格里，没有 #threadlist。
+  // 除了"怎么找行 / 抓回来往哪塞"，其余全部走上面的共用层。
+
+  const guideState = {
+    items: [], page: 1, perPage: 30,
+    nextUrl: null, totalPages: 0, readPages: 1,
+    filling: false, paused: false, fetched: 0, error: '', expired: false, timer: null
+  };
+
+  let guideUi = null;
+
+  // 用标题链接 thread-123-1-1.html 反推行。一行里有好几个同类链接（图标 / 标题 / 回复数），
+  // 靠 seen 去重保证一行只收一次
+  function scanGuideRows(root, seen) {
+    const out = [];
+    root.querySelectorAll('a[href*="thread-"]').forEach(a => {
+      const m = (a.getAttribute('href') || '').match(/thread-(\d+)-/);
+      if (!m) return;
+      const tid = m[1];
+      if (seen.has(tid)) return;
+      const tr = a.closest('tr');
+      if (!tr) return;
+      seen.add(tid);
+      const fl = tr.querySelector('a[href*="forum-"]');
+      out.push({ tr, tid, forum: fl ? fl.textContent.trim() : '' });
+    });
+    return out;
+  }
+
+  // 给一行配一条"缩略图行"（整行 colspan），并登记成 item。
+  // 先隐藏，等真取到图再展开 —— 没图的帖子不该留一条空白
+  function decorateGuideRow(row) {
+    const cell = document.createElement('td');
+    cell.colSpan = Math.max(row.tr.children.length, 1);
+    cell.style.cssText = 'padding:6px 10px 8px;background:#f7f8f9;';
+    const thumbRow = Object.assign(document.createElement('tr'), { className: 'sehua-guide-thumb' });
+    thumbRow.style.display = 'none';
+    thumbRow.appendChild(cell);
+    row.tr.insertAdjacentElement('afterend', thumbRow);
+    const item = { el: row.tr, tid: row.tid, forum: row.forum, target: cell, extra: thumbRow, matches: true };
+    guideState.items.push(item);
+    return item;
+  }
+
+  function collectGuideItems() {
+    const seen = new Set(guideState.items.map(it => it.tid));
+    scanGuideRows(document, seen).forEach(decorateGuideRow);
+  }
+
+  // 抓导读页的下一页：只关心带帖子链接的行
+  async function fetchGuidePage(url) {
+    const res = await gmFetchRaw(url);
+    let doc = null, trs = [];
+    try {
+      doc = new DOMParser().parseFromString(res.text || '', 'text/html');
+      doc.querySelectorAll('tr').forEach(tr => { if (tr.querySelector('a[href*="thread-"]')) trs.push(tr); });
+    } catch (e) { doc = null; }
+    if (trs.length) return { ok: true, doc, trs, next: searchNextUrl(doc) };
+    const info = classifySearchFailure(res);
+    // 没有任何帖子行、也没命中拦截特征：当作翻到底了，别一直重试
+    if (info.msg === '搜索结果页没有结果条目') return { ok: false, retry: false, msg: '已到底' };
+    return Object.assign({ ok: false, retry: true, trs: [], next: null }, info);
+  }
+
+  // 把抓回来的行接到列表末尾，并补上各自的缩略图行
+  function appendGuideRows(r) {
+    const seen = new Set(guideState.items.map(it => it.tid));
+    const last = guideState.items[guideState.items.length - 1];
+    let anchor = last ? last.extra : null;
+    r.trs.forEach(tr => {
+      const a = tr.querySelector('a[href*="thread-"]');
+      const m = (a && a.getAttribute('href') || '').match(/thread-(\d+)-/);
+      if (!m || seen.has(m[1]) || !anchor) return;
+      seen.add(m[1]);
+      const node = document.importNode(tr, true);
+      anchor.insertAdjacentElement('afterend', node);
+      const fl = node.querySelector('a[href*="forum-"]');
+      const item = decorateGuideRow({ tr: node, tid: m[1], forum: fl ? fl.textContent.trim() : '' });
+      anchor = item.extra;
+    });
+  }
+
+  function syncGuideUrl() {
+    try {
+      const url = new URL(location.href);
+      url.searchParams.set('page', String(guideState.readPages + 1));
+      history.replaceState(null, '', url);
+    } catch (e) {}
+  }
+
+  const guideOpts = { fetchPage: fetchGuidePage, append: appendGuideRows, afterFill: syncGuideUrl };
+
+  function mountGuidePager(table) {
+    const ui = makePagerBar(
+      () => gotoGuidePage(-1),
+      () => gotoGuidePage(1),
+      () => { guideState.paused = false; guideState.error = ''; guideState.fetched = 0; scheduleListFill(guideState, guideUi, guideOpts); paintPager(guideState, guideUi); }
+    );
+    if (table) table.insertAdjacentElement('afterend', ui.bar);
+    else document.body.appendChild(ui.bar);
+    guideUi = ui;
+  }
+
+  function gotoGuidePage(delta) {
+    const st = guideState;
+    if (st.filling) return;
+    const target = st.page + delta;
+    if (target < 1) return;
+    if (delta > 0 && st.items.filter(it => it.matches).length < st.page * st.perPage) return;
+    st.page = target;
+    applyListFilter(st, guideUi);
+    pill.reset();       // 换页等于换一批内容，胶囊清零重算
+    loadListThumbs(st); // 新一页还没取过图
+    syncGuideUrl();
+    scheduleListFill(st, guideUi, guideOpts);
+    if (st.items[0]) st.items[0].el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }
+
+  function guidePageMain(tries) {
+    // 站点偶尔先返回空壳再回填，这里给几秒钟的重试窗口
+    if (!document.querySelector('a[href*="thread-"]')) {
+      if ((tries || 0) < 20) setTimeout(() => guidePageMain((tries || 0) + 1), 250);
+      return;
+    }
+    addStyle(THUMB_CSS + WIDE_CSS + SEARCH_CSS + PILL_CSS + ' div.sehua-loading { color:#999; font-size:12px; text-align:center; padding:8px; } .sehua-guide-thumb td { padding:6px 10px 8px !important; background:#f7f8f9 !important; } .sehua-guide-thumb .sehua-thumb { width:100% !important; }');
+    removeUnused();
+
+    document.querySelectorAll('.sehua-forum-switch, .sehua-pager').forEach(el => el.remove());
+    guideUi = null;
+    const st = guideState;
+    Object.assign(st, {
+      items: [], page: 1, totalPages: 0, filling: false, paused: false, fetched: 0, error: '', expired: false, timer: null,
+      // URL 带 page 就说明上次读到这儿了，从这页接着读
+      readPages: Math.max(1, +(new URLSearchParams(location.search).get('page') || 1))
+    });
+
+    collectGuideItems();
+    if (!st.items.length) return;
+    st.perPage = st.items.length;          // 导读页一页多少条，按首屏实际条数量
+    st.nextUrl = searchNextUrl(document);
+    st.totalPages = searchTotalPages(document);
+
+    // 过滤开关：挂在表格上方（导读页没有 .sttl 那一行）
+    const table = st.items[0].el.closest('table');
+    const bar = document.createElement('div');
+    bar.style.cssText = 'display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:10px 0 6px;';
+    const wrap = createForumSwitchWrap();
+    bar.appendChild(wrap);
+    if (table && table.parentNode) table.parentNode.insertBefore(bar, table);
+    else document.body.insertBefore(bar, document.body.firstChild);
+    wrap.querySelectorAll('input').forEach(cb => cb.addEventListener('change', () => {
+      st.page = 1;
+      saveForumSwitchState();
+      applyListFilter(st, guideUi);
+      loadListThumbs(st);
+      scheduleListFill(st, guideUi, guideOpts);
+    }));
+
+    // 原站分页条藏掉，改用我们自己的（内容已跨页合并）
+    document.querySelectorAll('.pg').forEach(el => el.style.display = 'none');
+
+    mountGuidePager(table);
+    applyListFilter(st, guideUi);
+    scheduleListFill(st, guideUi, guideOpts);
+    loadListThumbs(st);
   }
 
   // ============================ 搜索拦截重试 ============================
@@ -1031,6 +1252,7 @@
     injectQueueSwitch();   // 有"新帖瀑布流"导航项的页面才可见
     if (searchBusyRetry()) return;   // 任何页面都先过一遍：非搜索页清零计数，繁忙页进入倒计时
     if (location.pathname.includes('/search.php')) searchPageMain();
+    else if (location.search.includes('mod=guide')) guidePageMain();   // 导读页：表格一行一帖
     else if (location.pathname.includes('/thread-') || location.search.includes('mod=viewthread')) detailPageMain();
     else if (location.pathname.includes('/forum.php') && !location.search) { addStyle(WIDE_CSS); removeUnused(); }
     else listPageMain();
