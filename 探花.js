@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         探花
 // @namespace    http://thbt6.com/
-// @version      2.1
+// @version      2.2
 // @description  探花BT：列表页居中显示详情页预览大图 + 分辨率徽章 + 一键复制磁力 + 列表/详情页去广告
 // @author       Chevy Yang
 // @match        https://irf.522328.com/*
 // @grant        GM_xmlhttpRequest
-// @connect      *
+// @connect      self
 // @run-at       document-idle
 // ==/UserScript==
 
