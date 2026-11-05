@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         U9A9
 // @namespace    https://u9a9.my/
-// @version      1.7
+// @version      1.8
 // @description  U9A9：列表页把详情页的预览图搬到列表显示（最多 5 张，横图 4:3、竖图 3:4 居中裁切），缩略图组右上角显示图片数量/剩余数量；清掉全站推广（横幅、导航推广位、假告示条、详情页侧栏与 JuicyAds）
 // @author       Chevy Yang
 // @match        https://u9a9.my/*
@@ -11,12 +11,7 @@
 // @match        https://u9a9.win/*
 // @match        https://u9a9.su/*
 // @grant        GM_xmlhttpRequest
-// @connect      u9a9.my
-// @connect      u9a9.com
-// @connect      u9a9.org
-// @connect      u9a9.de
-// @connect      u9a9.win
-// @connect      u9a9.su
+// @connect      self
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
