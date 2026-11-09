@@ -195,7 +195,7 @@
   // 有的模板（导读页）不给 class，退化成按文案找「下一页」
   const searchNextUrl = doc => {
     let a = doc.querySelector('.pg a.nxt, .pages a.next, a.nxt');
-    if (!a) a = [...doc.querySelectorAll('.pg a, .pages a, a')].find(x => (x.textContent || '').trim() === '下一页');
+    if (!a) a = [...doc.querySelectorAll('a')].find(x => (x.textContent || '').trim() === '下一页');
     if (!a) return null;
     try { return new URL(a.getAttribute('href'), location.href).href; } catch (e) { return null; }
   };
@@ -660,7 +660,7 @@
   //
   // 状态形状：
   // { items:[{ el, tid, forum, target, extra?, matches }], page, perPage, nextUrl, totalPages,
-  //   readPages, filling, paused, fetched, error, expired, timer }
+  //   readPages, filling, fetched, error, expired, timer }
   // el=整行（显隐用）、target=缩略图容器、extra=要跟着显示/隐藏的附加行（导读页的缩略图行）
 
   // 分页条：三个按钮 + 一行状态（两边同一套外观和行为）
@@ -705,7 +705,6 @@
     else if (v.full) tail = '本页已满';
     // 补到单轮上限时定时器已经不排了，必须单独说明，否则一直显示"正在补齐"却没请求
     else if (st.fetched >= SEARCH_FILL_MAX) tail = `本轮已补 ${SEARCH_FILL_MAX} 页，点「继续补齐」再抓`;
-    else if (st.paused) tail = '已暂停补齐';
     else tail = '5 秒后继续补齐…';
     const totalTxt = st.totalPages ? ` / ${st.totalPages}` : '';
     ui.label.textContent = `第 ${st.page} 页 · 本页 ${v.shown} / ${st.perPage} 条 · 筛选后共 ${v.matched.length} 条 · 已读原站 ${st.readPages}${totalTxt} 页 · ${tail}`;
@@ -756,14 +755,14 @@
   // 补齐：抓下一页 → 追加 → 重新过滤 → 继续排定时器
   function scheduleListFill(st, ui, opts) {
     clearTimeout(st.timer);
-    if (st.filling || st.paused || !st.nextUrl) return;
+    if (st.filling || !st.nextUrl) return;
     if (st.fetched >= SEARCH_FILL_MAX) return;
     if (st.items.filter(it => it.matches).length >= st.page * st.perPage) return;
     st.timer = setTimeout(() => fillListStep(st, ui, opts), SEARCH_FILL_GAP);
   }
 
   async function fillListStep(st, ui, opts) {
-    if (st.filling || st.paused || !st.nextUrl) return;
+    if (st.filling || !st.nextUrl) return;
     st.filling = true;
     paintPager(st, ui);
     let r;
@@ -827,7 +826,6 @@
     totalPages: 0,    // 原站一共多少页（从分页条最大页码推）
     readPages: 1,     // 已经读到原站第几页，刷新后从这页继续
     filling: false,
-    paused: false,
     fetched: 0,       // 本轮已经补抓了几页（只管限流保护，点「继续补齐」会清零）
     error: '',
     expired: false,   // 搜索快照失效：重试没意义，只能重新搜索
@@ -879,7 +877,7 @@
       () => {
         // 快照失效后重试同一个 searchmd5 没用，只能拿同一个关键词重新发起一次搜索
         if (searchState.expired) { reSearchFromCurrent(); return; }
-        searchState.paused = false; searchState.error = ''; searchState.fetched = 0;
+        searchState.error = ''; searchState.fetched = 0;
         scheduleFill();
       }
     );
@@ -929,21 +927,22 @@
     afterFill: () => syncUrlPage()   // 把"读到第几页"写进 URL，刷新后从这页接着读
   };
 
-  const updateSearchPager = () => paintPager(searchState, searchUi);
   const applyFilter = () => applyListFilter(searchState, searchUi);
   const scheduleFill = () => scheduleListFill(searchState, searchUi, searchOpts);
-  const fillNextPage = () => fillListStep(searchState, searchUi, searchOpts);
   const loadDetailThumbs = () => loadListThumbs(searchState);
 
   // 取图池核心：并发逐帖取详情图，注入 target 并计入胶囊
   async function runThumbPool(tasks) {
     let i = 0;
+    const ep = pill.epoch;   // 本批所属代际：翻页 pill.reset() 后它失效，旧任务不再注入/计入新页
     await Promise.all(Array.from({ length: MAX_CONCURRENT }, async () => {
       while (i < tasks.length) {
+        if (ep !== pill.epoch) break;   // 已翻页：整批作废，不再发新请求
         const task = tasks[i++];
         const tip = task.target.appendChild(Object.assign(document.createElement('div'), { className: 'sehua-loading', textContent: '加载中...' }));
         try {
           const urls = await fetchDetailImages(task.tid);
+          if (ep !== pill.epoch) continue;              // 请求在途时翻了页：丢弃迟到结果
           if (urls === null) continue;                  // 被拦：不标记，下次刷新再试
           task.target.dataset.sehuaChecked = '1';
           if (urls.length && !task.target.querySelector('.sehua-thumb')) {
@@ -972,7 +971,7 @@
     searchUi = null;
     // URL 带 page 就说明上次读到这儿了，从这页接着读；fetched 单独归零，只用于限流保护
     const urlPage = Math.max(1, +(new URLSearchParams(location.search).get('page') || 1));
-    Object.assign(searchState, { items: [], page: 1, perPage: SEARCH_PER_PAGE, totalPages: 0, readPages: urlPage, filling: false, paused: false, fetched: 0, error: '', timer: null });
+    Object.assign(searchState, { items: [], page: 1, perPage: SEARCH_PER_PAGE, totalPages: 0, readPages: urlPage, filling: false, fetched: 0, error: '', timer: null });
     collectSearchItems();
     searchState.nextUrl = searchNextUrl(document);
     searchState.totalPages = searchTotalPages(document);
@@ -1000,7 +999,7 @@
   const guideState = {
     items: [], page: 1, perPage: SEARCH_PER_PAGE,
     nextUrl: null, totalPages: 0, readPages: 1,
-    filling: false, paused: false, fetched: 0, error: '', expired: false, timer: null
+    filling: false, fetched: 0, error: '', expired: false, timer: null
   };
 
   let guideUi = null;
@@ -1090,7 +1089,7 @@
     const ui = makePagerBar(
       () => gotoGuidePage(-1),
       () => gotoGuidePage(1),
-      () => { guideState.paused = false; guideState.error = ''; guideState.fetched = 0; scheduleListFill(guideState, guideUi, guideOpts); paintPager(guideState, guideUi); }
+      () => { guideState.error = ''; guideState.fetched = 0; scheduleListFill(guideState, guideUi, guideOpts); paintPager(guideState, guideUi); }
     );
     if (table) table.insertAdjacentElement('afterend', ui.bar);
     else document.body.appendChild(ui.bar);
@@ -1131,7 +1130,7 @@
     guideUi = null;
     const st = guideState;
     Object.assign(st, {
-      items: [], page: 1, totalPages: 0, filling: false, paused: false, fetched: 0, error: '', expired: false, timer: null,
+      items: [], page: 1, totalPages: 0, filling: false, fetched: 0, error: '', expired: false, timer: null,
       // URL 带 page 就说明上次读到这儿了，从这页接着读
       readPages: Math.max(1, +(new URLSearchParams(location.search).get('page') || 1))
     });
