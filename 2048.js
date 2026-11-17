@@ -4,7 +4,7 @@
 // @version      5.5
 // @description  2048：去广告（推荐块/导航条/影片横幅/打赏卡）；隐藏详情页侧栏；检索页高级搜索「所在版块」默认选中「國內原創」；去懒加载——列表原生 lazy 与详情页占位图（data-original/data-src）一律立即加载，防抖观察者只接管 AJAX 新插入的图（不监听属性变更）；图片加载队列（10 张/秒、在途≤10、首屏突发 10），列表页"搜索"右边有队列模式开关（关闭即一次性全量加载，状态存本地）；右下角加载进度胶囊。
 // @author       Chevy Yang
-// @match        https://bbs.hdaksog.com/*
+// @match        https://bbs.jiuose.com/*
 // @run-at       document-idle
 // @noframes
 // @grant        none
